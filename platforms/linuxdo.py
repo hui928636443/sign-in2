@@ -338,9 +338,11 @@ class LinuxDoAdapter(BasePlatformAdapter):
             logger.error("未找到主题帖")
             return False
         
-        logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择20个")
+        logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择浏览")
         
-        for topic in random.sample(topic_list, min(20, len(topic_list))):
+        # 随机选择 20-30 个帖子
+        browse_count = random.randint(20, 30)
+        for topic in random.sample(topic_list, min(browse_count, len(topic_list))):
             self._click_one_topic(topic.attr("href"))
         
         return True
