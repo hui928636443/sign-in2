@@ -368,8 +368,8 @@ class LinuxDoAdapter(BasePlatformAdapter):
         
         logger.info(f"发现 {len(topic_urls)} 个主题帖，随机选择浏览")
         
-        # 随机选择 2 个帖子 (测试模式，正式改回 5-15)
-        browse_count = 2
+        # 随机选择 5-15 个帖子
+        browse_count = random.randint(5, 15)
         actual_count = min(browse_count, len(topic_urls))
         selected_urls = random.sample(topic_urls, actual_count)
         
@@ -440,6 +440,9 @@ class LinuxDoAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error(f"点赞失败: {e}")
     
+    # 需要屏蔽的分类
+    BLOCKED_CATEGORIES = {"公告", "运营反馈"}
+    
     async def _collect_hot_topics(self) -> None:
         """收集热门话题（按浏览量排序的新帖子）"""
         logger.info("收集热门话题...")
@@ -462,6 +465,15 @@ class LinuxDoAdapter(BasePlatformAdapter):
                     if url and not url.startswith("http"):
                         url = f"https://linux.do{url}"
                     
+                    # 获取分类
+                    category_ele = await row.query_selector(".category-name")
+                    category = await category_ele.inner_text() if category_ele else ""
+                    category = category.strip()
+                    
+                    # 跳过屏蔽的分类
+                    if category in self.BLOCKED_CATEGORIES:
+                        continue
+                    
                     # 获取浏览量
                     views_ele = await row.query_selector(".views")
                     views_text = await views_ele.inner_text() if views_ele else "0"
@@ -471,11 +483,6 @@ class LinuxDoAdapter(BasePlatformAdapter):
                     replies_ele = await row.query_selector(".replies")
                     replies_text = await replies_ele.inner_text() if replies_ele else "0"
                     replies = self._parse_number(replies_text.strip())
-                    
-                    # 获取分类
-                    category_ele = await row.query_selector(".category-name")
-                    category = await category_ele.inner_text() if category_ele else ""
-                    category = category.strip()
                     
                     if title and views > 0:
                         self._hot_topics.append({
