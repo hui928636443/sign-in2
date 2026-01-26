@@ -163,9 +163,9 @@ uv run python main.py --debug
 
 项目提供三个工作流：
 
-1. **daily-check-in.yml** - 统一签到（每6小时运行，支持手动选择平台）
+1. **daily-check-in.yml** - 统一签到（每12小时运行，支持手动选择平台）
 2. **linuxdo-only.yml** - 仅 LinuxDo 签到（每12小时运行）
-3. **anyrouter-only.yml** - 仅 AnyRouter 签到（每6小时运行）
+3. **anyrouter-only.yml** - 仅 AnyRouter 签到（每12小时运行）
 
 #### 配置步骤
 
@@ -183,7 +183,7 @@ uv run python main.py --debug
    - `SC3_PUSH_KEY` - Server酱³ 通知
 
 3. 进入 `Actions` 选项卡，点击 `I understand my workflows, go ahead and enable them` 启用工作流
-4. 工作流会按计划自动运行（每6小时一次）
+4. 工作流会按计划自动运行（每12小时一次）
 
 #### 手动触发
 
@@ -194,7 +194,7 @@ uv run python main.py --debug
 ## 项目结构
 
 ```
-linuxdo-checkin/
+sign-in/
 ├── main.py                    # 主入口
 ├── pyproject.toml             # 项目配置
 ├── platforms/                 # 平台适配器
@@ -207,7 +207,6 @@ linuxdo-checkin/
 │   ├── notify.py             # 通知管理
 │   ├── retry.py              # 重试装饰器
 │   └── logging.py            # 日志配置
-├── tests/                     # 测试
 └── .github/workflows/         # GitHub Actions
 ```
 
