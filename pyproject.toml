@@ -20,9 +20,8 @@ classifiers = [
 ]
 
 dependencies = [
-    # Browser automation
-    "DrissionPage>=4.1.0",
-    "playwright>=1.40.0",
+    # Browser automation (Patchright = anti-detection Playwright)
+    "patchright>=1.49.0",
     
     # HTTP clients
     "httpx[http2]>=0.25.0",

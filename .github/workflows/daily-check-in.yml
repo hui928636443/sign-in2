@@ -24,10 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      # 安装 Chrome (用于 DrissionPage)
-      - uses: browser-actions/setup-chrome@v1
-      - name: Check Chrome version
-        run: chrome --version
+      # 安装 Chrome (Patchright 会自动管理浏览器)
+      # - uses: browser-actions/setup-chrome@v1
+      # - name: Check Chrome version
+      #   run: chrome --version
       
       # 安装 uv
       - name: Install uv
@@ -43,9 +43,9 @@ jobs:
       - name: Install dependencies
         run: uv sync
       
-      # 安装 Playwright 浏览器 (用于 AnyRouter WAF bypass)
-      - name: Install Playwright browsers
-        run: uv run playwright install chromium
+      # 安装 Patchright 浏览器 (反检测 Playwright)
+      - name: Install Patchright browsers
+        run: uv run patchright install chromium
       
       # 执行签到
       - name: Execute multi-platform check-in

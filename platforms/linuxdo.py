@@ -2,23 +2,22 @@
 """
 LinuxDo 论坛签到适配器
 
-从 main.py 迁移的 LinuxDo 签到逻辑，使用 DrissionPage + curl_cffi。
+使用 Patchright (反检测 Playwright) + curl_cffi 实现自动签到。
 
 Requirements:
-- 2.3: 保持 DrissionPage + curl_cffi 登录逻辑
+- 2.3: 使用 Patchright 替代 DrissionPage 提升反检测能力
 - 2.5: 保持浏览帖子、随机点赞功能
 """
 
-import os
+import asyncio
 import random
-import sys
 import time
 from typing import Optional
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests
-from DrissionPage import Chromium, ChromiumOptions
 from loguru import logger
+from patchright.async_api import async_playwright, Browser, Page
 from tabulate import tabulate
 
 from platforms.base import BasePlatformAdapter, CheckinResult, CheckinStatus
@@ -34,7 +33,7 @@ CSRF_URL = "https://linux.do/session/csrf"
 class LinuxDoAdapter(BasePlatformAdapter):
     """LinuxDo 论坛签到适配器
     
-    使用 DrissionPage 进行浏览器自动化，curl_cffi 进行 API 请求。
+    使用 Patchright 进行浏览器自动化（反检测），curl_cffi 进行 API 请求。
     支持浏览帖子和随机点赞功能。
     """
     
@@ -58,11 +57,13 @@ class LinuxDoAdapter(BasePlatformAdapter):
         self.browse_enabled = browse_enabled
         self._account_name = account_name
         
-        self.browser: Optional[Chromium] = None
-        self.page = None
+        self._playwright = None
+        self.browser: Optional[Browser] = None
+        self.context = None
+        self.page: Optional[Page] = None
         self.session: Optional[requests.Session] = None
         self._connect_info: Optional[dict] = None
-        self._hot_topics: list[dict] = []  # 存储热门话题
+        self._hot_topics: list[dict] = []
     
     @property
     def platform_name(self) -> str:
@@ -72,37 +73,31 @@ class LinuxDoAdapter(BasePlatformAdapter):
     def account_name(self) -> str:
         return self._account_name if self._account_name else self.username
     
-    def _get_platform_identifier(self) -> str:
-        """获取平台标识符用于 User-Agent"""
-        if sys.platform == "linux" or sys.platform == "linux2":
-            return "X11; Linux x86_64"
-        elif sys.platform == "darwin":
-            return "Macintosh; Intel Mac OS X 10_15_7"
-        elif sys.platform == "win32":
-            return "Windows NT 10.0; Win64; x64"
-        return "X11; Linux x86_64"
-    
-    def _init_browser(self) -> None:
-        """初始化浏览器"""
-        # 清理可能影响浏览器的环境变量
-        os.environ.pop("DISPLAY", None)
-        os.environ.pop("DYLD_LIBRARY_PATH", None)
+    async def _init_browser(self) -> None:
+        """初始化 Patchright 浏览器"""
+        self._playwright = await async_playwright().start()
         
-        platform_id = self._get_platform_identifier()
-        
-        co = (
-            ChromiumOptions()
-            .headless(True)
-            .incognito(True)
-            .set_argument("--no-sandbox")
-        )
-        co.set_user_agent(
-            f"Mozilla/5.0 ({platform_id}) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+        # Patchright 自带反检测，使用 chromium
+        self.browser = await self._playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+            ]
         )
         
-        self.browser = Chromium(co)
-        self.page = self.browser.new_tab()
+        # 创建上下文，设置 viewport 和 user agent
+        self.context = await self.browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+            ),
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+        )
+        
+        self.page = await self.context.new_page()
     
     def _init_session(self) -> None:
         """初始化 HTTP 会话"""
@@ -120,7 +115,7 @@ class LinuxDoAdapter(BasePlatformAdapter):
         """执行登录操作"""
         logger.info("开始登录 LinuxDo")
         
-        self._init_browser()
+        await self._init_browser()
         self._init_session()
         
         # Step 1: 获取 CSRF Token
@@ -181,11 +176,11 @@ class LinuxDoAdapter(BasePlatformAdapter):
         # 获取 Connect 信息
         self._fetch_connect_info()
         
-        # Step 3: 同步 Cookie 到 DrissionPage
-        logger.info("同步 Cookie 到 DrissionPage...")
+        # Step 3: 同步 Cookie 到 Patchright
+        logger.info("同步 Cookie 到 Patchright...")
         cookies_dict = self.session.cookies.get_dict()
         
-        dp_cookies = [
+        cookies_list = [
             {
                 "name": name,
                 "value": value,
@@ -195,18 +190,20 @@ class LinuxDoAdapter(BasePlatformAdapter):
             for name, value in cookies_dict.items()
         ]
         
-        self.page.set.cookies(dp_cookies)
+        await self.context.add_cookies(cookies_list)
         
         logger.info("Cookie 设置完成，导航至 linux.do...")
-        self.page.get(HOME_URL)
+        await self.page.goto(HOME_URL, wait_until="domcontentloaded")
         
-        time.sleep(5)
+        # 等待页面加载
+        await asyncio.sleep(5)
         
         # 验证登录状态
         try:
-            user_ele = self.page.ele("@id=current-user")
+            user_ele = await self.page.query_selector("#current-user")
             if not user_ele:
-                if "avatar" in self.page.html:
+                content = await self.page.content()
+                if "avatar" in content:
                     logger.info("登录验证成功 (通过 avatar)")
                     return True
                 logger.error("登录验证失败 (未找到 current-user)")
@@ -226,7 +223,7 @@ class LinuxDoAdapter(BasePlatformAdapter):
             details["connect_info"] = self._connect_info
         
         # 收集热门话题
-        self._collect_hot_topics()
+        await self._collect_hot_topics()
         if self._hot_topics:
             details["hot_topics"] = self._hot_topics
         
@@ -241,7 +238,7 @@ class LinuxDoAdapter(BasePlatformAdapter):
         
         # 浏览帖子
         try:
-            browse_count = self._click_topics()
+            browse_count = await self._click_topics()
             if browse_count == 0:
                 return CheckinResult(
                     platform=self.platform_name,
@@ -279,17 +276,31 @@ class LinuxDoAdapter(BasePlatformAdapter):
         """清理浏览器资源"""
         if self.page:
             try:
-                self.page.close()
+                await self.page.close()
             except Exception:
                 pass
             self.page = None
         
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+            self.context = None
+        
         if self.browser:
             try:
-                self.browser.quit()
+                await self.browser.close()
             except Exception:
                 pass
             self.browser = None
+        
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
         
         if self.session:
             self.session = None
@@ -334,59 +345,73 @@ class LinuxDoAdapter(BasePlatformAdapter):
             logger.warning(f"获取 Connect 信息失败: {e}")
             self._connect_info = {}
     
-    def _click_topics(self) -> int:
+    async def _click_topics(self) -> int:
         """点击并浏览主题帖，返回浏览数量"""
         try:
-            topic_list = self.page.ele("@id=list-area").eles(".:title")
+            # 获取所有话题链接
+            topic_links = await self.page.query_selector_all("#list-area .title")
         except Exception:
-            topic_list = []
+            topic_links = []
         
-        if not topic_list:
+        if not topic_links:
             logger.error("未找到主题帖")
             return 0
         
-        logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择浏览")
+        # 获取所有 href
+        topic_urls = []
+        for link in topic_links:
+            href = await link.get_attribute("href")
+            if href:
+                if not href.startswith("http"):
+                    href = f"https://linux.do{href}"
+                topic_urls.append(href)
         
-        # 随机选择 5-15 个帖子
-        browse_count = random.randint(5, 15)
-        actual_count = min(browse_count, len(topic_list))
-        for topic in random.sample(topic_list, actual_count):
-            self._click_one_topic(topic.attr("href"))
+        logger.info(f"发现 {len(topic_urls)} 个主题帖，随机选择浏览")
+        
+        # 随机选择 2 个帖子 (测试模式，正式改回 5-15)
+        browse_count = 2
+        actual_count = min(browse_count, len(topic_urls))
+        selected_urls = random.sample(topic_urls, actual_count)
+        
+        for url in selected_urls:
+            await self._click_one_topic(url)
         
         logger.info(f"浏览了 {actual_count} 个帖子")
         return actual_count
     
-    @retry_decorator(max_retries=3, delay_range=(5.0, 10.0))
-    def _click_one_topic(self, topic_url: str) -> bool:
+    async def _click_one_topic(self, topic_url: str) -> bool:
         """点击单个主题帖"""
-        new_page = self.browser.new_tab()
+        new_page = await self.context.new_page()
         try:
-            new_page.get(topic_url)
+            await new_page.goto(topic_url, wait_until="domcontentloaded")
             if random.random() < 0.3:
-                self._click_like(new_page)
-            self._browse_post(new_page)
+                await self._click_like(new_page)
+            await self._browse_post(new_page)
             return True
+        except Exception as e:
+            logger.warning(f"浏览帖子失败: {e}")
+            return False
         finally:
             try:
-                new_page.close()
+                await new_page.close()
             except Exception:
                 pass
     
-    def _browse_post(self, page) -> None:
+    async def _browse_post(self, page: Page) -> None:
         """浏览帖子内容"""
         prev_url = None
         
         for _ in range(10):
             scroll_distance = random.randint(550, 650)
             logger.info(f"向下滚动 {scroll_distance} 像素...")
-            page.run_js(f"window.scrollBy(0, {scroll_distance})")
+            await page.evaluate(f"window.scrollBy(0, {scroll_distance})")
             logger.info(f"已加载页面: {page.url}")
             
             if random.random() < 0.03:
                 logger.success("随机退出浏览")
                 break
             
-            at_bottom = page.run_js(
+            at_bottom = await page.evaluate(
                 "window.scrollY + window.innerHeight >= document.body.scrollHeight"
             )
             current_url = page.url
@@ -399,62 +424,58 @@ class LinuxDoAdapter(BasePlatformAdapter):
             
             wait_time = random.uniform(2, 4)
             logger.info(f"等待 {wait_time:.2f} 秒...")
-            time.sleep(wait_time)
+            await asyncio.sleep(wait_time)
     
-    def _click_like(self, page) -> None:
+    async def _click_like(self, page: Page) -> None:
         """点赞帖子"""
         try:
-            like_button = page.ele(".discourse-reactions-reaction-button")
+            like_button = await page.query_selector(".discourse-reactions-reaction-button")
             if like_button:
                 logger.info("找到未点赞的帖子，准备点赞")
-                like_button.click()
+                await like_button.click()
                 logger.info("点赞成功")
-                time.sleep(random.uniform(1, 2))
+                await asyncio.sleep(random.uniform(1, 2))
             else:
                 logger.info("帖子可能已经点过赞了")
         except Exception as e:
             logger.error(f"点赞失败: {e}")
     
-    def _collect_hot_topics(self) -> None:
+    async def _collect_hot_topics(self) -> None:
         """收集热门话题（按浏览量排序的新帖子）"""
         logger.info("收集热门话题...")
         self._hot_topics = []
         
         try:
-            # 获取话题列表区域
-            list_area = self.page.ele("@id=list-area")
-            if not list_area:
-                logger.warning("未找到话题列表区域")
-                return
-            
             # 获取所有话题行
-            topic_rows = list_area.eles("tag:tr")
+            topic_rows = await self.page.query_selector_all("#list-area tr")
             
             for row in topic_rows:
                 try:
                     # 获取标题链接
-                    title_link = row.ele(".:title")
+                    title_link = await row.query_selector(".title")
                     if not title_link:
                         continue
                     
-                    title = title_link.text.strip()
-                    url = title_link.attr("href")
-                    if not url.startswith("http"):
+                    title = await title_link.inner_text()
+                    title = title.strip()
+                    url = await title_link.get_attribute("href")
+                    if url and not url.startswith("http"):
                         url = f"https://linux.do{url}"
                     
-                    # 获取浏览量 (views 列)
-                    views_ele = row.ele(".:views")
-                    views_text = views_ele.text.strip() if views_ele else "0"
-                    views = self._parse_number(views_text)
+                    # 获取浏览量
+                    views_ele = await row.query_selector(".views")
+                    views_text = await views_ele.inner_text() if views_ele else "0"
+                    views = self._parse_number(views_text.strip())
                     
-                    # 获取回复数 (replies 列)
-                    replies_ele = row.ele(".:replies")
-                    replies_text = replies_ele.text.strip() if replies_ele else "0"
-                    replies = self._parse_number(replies_text)
+                    # 获取回复数
+                    replies_ele = await row.query_selector(".replies")
+                    replies_text = await replies_ele.inner_text() if replies_ele else "0"
+                    replies = self._parse_number(replies_text.strip())
                     
                     # 获取分类
-                    category_ele = row.ele(".:category-name")
-                    category = category_ele.text.strip() if category_ele else ""
+                    category_ele = await row.query_selector(".category-name")
+                    category = await category_ele.inner_text() if category_ele else ""
+                    category = category.strip()
                     
                     if title and views > 0:
                         self._hot_topics.append({
@@ -483,16 +504,12 @@ class LinuxDoAdapter(BasePlatformAdapter):
             return 0
         
         try:
-            # 处理 k/K 后缀 (千)
             if "k" in text:
                 return int(float(text.replace("k", "")) * 1000)
-            # 处理 万 后缀
             if "万" in text:
                 return int(float(text.replace("万", "")) * 10000)
-            # 处理 m/M 后缀 (百万)
             if "m" in text:
                 return int(float(text.replace("m", "")) * 1000000)
-            # 普通数字
             return int(text.replace(",", ""))
         except (ValueError, AttributeError):
             return 0
