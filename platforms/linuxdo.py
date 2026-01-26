@@ -390,8 +390,8 @@ class LinuxDoAdapter(BasePlatformAdapter):
         
         logger.info(f"发现 {len(topic_urls)} 个可浏览帖子，随机选择浏览")
         
-        # 测试模式：只看 2 个帖子
-        browse_count = 2
+        # 每次浏览 15 个帖子
+        browse_count = 15
         actual_count = min(browse_count, len(topic_urls))
         selected_urls = random.sample(topic_urls, actual_count)
         
