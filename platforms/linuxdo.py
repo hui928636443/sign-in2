@@ -235,7 +235,8 @@ class LinuxDoAdapter(BasePlatformAdapter):
         
         # 浏览帖子
         try:
-            if not self._click_topics():
+            browse_count = self._click_topics()
+            if browse_count == 0:
                 return CheckinResult(
                     platform=self.platform_name,
                     account=self.account_name,
@@ -248,7 +249,7 @@ class LinuxDoAdapter(BasePlatformAdapter):
                 platform=self.platform_name,
                 account=self.account_name,
                 status=CheckinStatus.SUCCESS,
-                message="登录成功 + 浏览任务完成",
+                message=f"登录成功，浏览了 {browse_count} 个帖子",
                 details=details if details else None,
             )
         except Exception as e:
@@ -327,8 +328,8 @@ class LinuxDoAdapter(BasePlatformAdapter):
             logger.warning(f"获取 Connect 信息失败: {e}")
             self._connect_info = {}
     
-    def _click_topics(self) -> bool:
-        """点击并浏览主题帖"""
+    def _click_topics(self) -> int:
+        """点击并浏览主题帖，返回浏览数量"""
         try:
             topic_list = self.page.ele("@id=list-area").eles(".:title")
         except Exception:
@@ -336,16 +337,18 @@ class LinuxDoAdapter(BasePlatformAdapter):
         
         if not topic_list:
             logger.error("未找到主题帖")
-            return False
+            return 0
         
         logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择浏览")
         
         # 随机选择 5-15 个帖子
         browse_count = random.randint(5, 15)
-        for topic in random.sample(topic_list, min(browse_count, len(topic_list))):
+        actual_count = min(browse_count, len(topic_list))
+        for topic in random.sample(topic_list, actual_count):
             self._click_one_topic(topic.attr("href"))
         
-        return True
+        logger.info(f"浏览了 {actual_count} 个帖子")
+        return actual_count
     
     @retry_decorator(max_retries=3, delay_range=(5.0, 10.0))
     def _click_one_topic(self, topic_url: str) -> bool:
