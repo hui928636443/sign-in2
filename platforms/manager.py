@@ -155,11 +155,11 @@ class PlatformManager:
         
         # 格式化通知内容
         results_dicts = [r.to_dict() for r in self.results]
-        title, content = NotificationManager.format_summary_message(results_dicts)
+        title, text_content, html_content = NotificationManager.format_summary_message(results_dicts)
         
-        # 发送通知
+        # 发送通知（使用 HTML 格式）
         with self.notify:
-            self.notify.push_message(title, content)
+            self.notify.push_message(title, html_content, msg_type="html")
     
     def _check_balance_change(self) -> bool:
         """检查是否有余额变化

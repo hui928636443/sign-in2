@@ -574,7 +574,7 @@ class NotificationManager:
     def format_summary_message(
         results: list[dict],
         timestamp: Optional[datetime] = None
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         """格式化签到汇总消息
         
         Args:
@@ -582,7 +582,7 @@ class NotificationManager:
             timestamp: 时间戳
         
         Returns:
-            tuple: (标题, 内容)
+            tuple: (标题, 纯文本内容, HTML内容)
         """
         if timestamp is None:
             timestamp = datetime.now()
@@ -611,17 +611,31 @@ class NotificationManager:
         
         if failed_count == 0:
             title = f"✅ {platform_name}签到完成"
+            status_color = "#10b981"
+            status_text = "全部成功"
         else:
             title = f"❌ {platform_name}签到失败"
+            status_color = "#ef4444"
+            status_text = f"{failed_count}个失败"
         
-        # 内容
-        lines = [
-            f"[时间] {timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
-            "",
-        ]
+        # 纯文本内容
+        lines = [f"[时间] {timestamp.strftime('%Y-%m-%d %H:%M:%S')}", ""]
+        
+        # HTML 内容
+        html_parts = [f'''
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background: linear-gradient(135deg, {status_color}, #3b82f6); color: white; padding: 20px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="margin: 0; font-size: 24px;">{title}</h1>
+        <p style="margin: 10px 0 0 0; opacity: 0.9;">{timestamp.strftime('%Y-%m-%d %H:%M:%S')}</p>
+    </div>
+    <div style="background: #f8fafc; padding: 20px; border-radius: 0 0 12px 12px; border: 1px solid #e2e8f0; border-top: none;">
+''']
         
         # AnyRouter 余额信息
         if anyrouter_results:
+            html_parts.append('<div style="margin-bottom: 20px;"><h2 style="color: #1e40af; font-size: 16px; margin: 0 0 12px 0; padding-bottom: 8px; border-bottom: 2px solid #3b82f6;">💰 AnyRouter 余额</h2>')
+            html_parts.append('<div style="display: grid; gap: 8px;">')
+            
             for result in anyrouter_results:
                 details = result.get("details", {})
                 account = result.get("account", "Unknown")
@@ -630,14 +644,29 @@ class NotificationManager:
                 if status == "success" and details:
                     balance = details.get("balance", "N/A")
                     used = details.get("used", "N/A")
-                    lines.append(f"[余额] {account}")
-                    lines.append(f"💰 当前余额: {balance}, 已使用: {used}")
+                    lines.append(f"[余额] {account}: {balance}, 已使用: {used}")
+                    html_parts.append(f'''
+                    <div style="background: white; padding: 12px; border-radius: 8px; border-left: 4px solid #10b981;">
+                        <div style="font-weight: 600; color: #1f2937;">{account}</div>
+                        <div style="color: #6b7280; font-size: 14px; margin-top: 4px;">余额: <span style="color: #10b981; font-weight: 600;">{balance}</span> | 已用: <span style="color: #f59e0b;">{used}</span></div>
+                    </div>''')
                 elif status == "failed":
-                    lines.append(f"[失败] {account}: {result.get('message', '未知错误')}")
+                    msg = result.get('message', '未知错误')
+                    lines.append(f"[失败] {account}: {msg}")
+                    html_parts.append(f'''
+                    <div style="background: #fef2f2; padding: 12px; border-radius: 8px; border-left: 4px solid #ef4444;">
+                        <div style="font-weight: 600; color: #991b1b;">{account}</div>
+                        <div style="color: #dc2626; font-size: 14px; margin-top: 4px;">{msg}</div>
+                    </div>''')
+            
+            html_parts.append('</div></div>')
             lines.append("")
         
         # LinuxDo 结果
         if linuxdo_results:
+            html_parts.append('<div style="margin-bottom: 20px;"><h2 style="color: #ea580c; font-size: 16px; margin: 0 0 12px 0; padding-bottom: 8px; border-bottom: 2px solid #f97316;">🐧 LinuxDO 签到</h2>')
+            html_parts.append('<div style="display: grid; gap: 8px;">')
+            
             for result in linuxdo_results:
                 account = result.get("account", "Unknown")
                 status = result.get("status", "unknown")
@@ -645,8 +674,20 @@ class NotificationManager:
                 
                 if status == "success":
                     lines.append(f"[LinuxDO] {account}: {message}")
+                    html_parts.append(f'''
+                    <div style="background: white; padding: 12px; border-radius: 8px; border-left: 4px solid #10b981;">
+                        <div style="font-weight: 600; color: #1f2937;">{account}</div>
+                        <div style="color: #10b981; font-size: 14px; margin-top: 4px;">✓ {message}</div>
+                    </div>''')
                 elif status == "failed":
                     lines.append(f"[失败] {account}: {message}")
+                    html_parts.append(f'''
+                    <div style="background: #fef2f2; padding: 12px; border-radius: 8px; border-left: 4px solid #ef4444;">
+                        <div style="font-weight: 600; color: #991b1b;">{account}</div>
+                        <div style="color: #dc2626; font-size: 14px; margin-top: 4px;">✗ {message}</div>
+                    </div>''')
+            
+            html_parts.append('</div></div>')
             lines.append("")
             
             # 显示热门话题
@@ -654,37 +695,62 @@ class NotificationManager:
                 details = result.get("details") or {}
                 hot_topics = details.get("hot_topics", [])
                 if hot_topics:
-                    lines.append("🔥 [HOT TOPICS] LinuxDo 热门帖子:")
+                    lines.append("🔥 热门帖子:")
+                    html_parts.append('<div><h2 style="color: #dc2626; font-size: 16px; margin: 0 0 12px 0; padding-bottom: 8px; border-bottom: 2px solid #ef4444;">🔥 LinuxDO 热门帖子</h2>')
+                    html_parts.append('<div style="display: grid; gap: 6px;">')
+                    
                     for i, topic in enumerate(hot_topics[:10], 1):
-                        title = topic.get("title", "")
+                        topic_title = topic.get("title", "")
                         views = topic.get("views", 0)
                         replies = topic.get("replies", 0)
                         url = topic.get("url", "")
-                        # 格式化浏览量
+                        
                         if views >= 10000:
                             views_str = f"{views/10000:.1f}万"
                         elif views >= 1000:
                             views_str = f"{views/1000:.1f}k"
                         else:
                             views_str = str(views)
-                        lines.append(f"  {i}. {title}")
+                        
+                        lines.append(f"  {i}. {topic_title}")
                         lines.append(f"     👁 {views_str} | 💬 {replies} | {url}")
+                        
+                        html_parts.append(f'''
+                        <div style="background: white; padding: 10px 12px; border-radius: 6px; display: flex; align-items: center; gap: 10px;">
+                            <span style="background: #f97316; color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0;">{i}</span>
+                            <div style="flex: 1; min-width: 0;">
+                                <a href="{url}" style="color: #1f2937; text-decoration: none; font-size: 14px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{topic_title}</a>
+                                <div style="color: #9ca3af; font-size: 12px; margin-top: 2px;">👁 {views_str} · 💬 {replies}</div>
+                            </div>
+                        </div>''')
+                    
+                    html_parts.append('</div></div>')
                     lines.append("")
-                    break  # 只显示一次热门话题
+                    break
         
         # 统计信息
-        lines.append("[统计] 签到结果:")
-        lines.append(f"[成功] {success_count}/{total_count}")
-        lines.append(f"[失败] {failed_count}/{total_count}")
-        
+        lines.append(f"[统计] 成功: {success_count}/{total_count}, 失败: {failed_count}/{total_count}")
         if failed_count == 0:
             lines.append("[完成] 全部账号签到成功!")
         else:
             lines.append(f"[警告] {failed_count} 个账号签到失败!")
         
-        content = "\n".join(lines)
+        html_parts.append(f'''
+        <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #e2e8f0; text-align: center;">
+            <div style="display: inline-flex; gap: 20px; font-size: 14px;">
+                <span style="color: #10b981;">✓ 成功: {success_count}</span>
+                <span style="color: #ef4444;">✗ 失败: {failed_count}</span>
+                <span style="color: #6b7280;">共: {total_count}</span>
+            </div>
+        </div>
+    </div>
+</div>
+''')
         
-        return title, content
+        text_content = "\n".join(lines)
+        html_content = "".join(html_parts)
+        
+        return title, text_content, html_content
 
 
 # 便捷函数
