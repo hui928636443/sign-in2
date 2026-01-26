@@ -1,0 +1,66 @@
+name: AnyRouter Only Check-in
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'  # 每12小时执行一次
+
+  workflow_dispatch:
+
+jobs:
+  anyrouter-checkin:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      
+      # 安装 uv
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      
+      # 设置 Python
+      - name: Set up Python
+        run: uv python install 3.12
+      
+      # 安装依赖
+      - name: Install dependencies
+        run: uv sync
+      
+      # 安装 Playwright 浏览器 (用于 WAF bypass)
+      - name: Install Playwright browsers
+        run: uv run playwright install chromium
+      
+      # 执行 AnyRouter 签到
+      - name: Execute AnyRouter check-in
+        env:
+          # AnyRouter 配置
+          ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
+          PROVIDERS: ${{ secrets.PROVIDERS }}
+          
+          # 通知配置
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          SC3_PUSH_KEY: ${{ secrets.SC3_PUSH_KEY }}
+          WXPUSH_URL: ${{ secrets.WXPUSH_URL }}
+          WXPUSH_TOKEN: ${{ secrets.WXPUSH_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_USERID: ${{ secrets.TELEGRAM_USERID }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
+          DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          BARK_SERVER: ${{ secrets.BARK_SERVER }}
+        run: uv run python main.py --platform anyrouter
+
+      # 清理旧的工作流运行记录
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 10
+          keep_minimum_runs: 6

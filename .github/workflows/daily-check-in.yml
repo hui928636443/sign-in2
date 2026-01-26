@@ -1,0 +1,118 @@
+name: Multi-Platform Daily Check-in
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'  # 每12小时执行一次
+
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: '指定平台 (留空运行所有)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - linuxdo
+          - anyrouter
+
+jobs:
+  checkin:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      
+      # 安装 Chrome (用于 DrissionPage)
+      - uses: browser-actions/setup-chrome@v1
+      - name: Check Chrome version
+        run: chrome --version
+      
+      # 安装 uv
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      
+      # 设置 Python
+      - name: Set up Python
+        run: uv python install 3.12
+      
+      # 安装依赖
+      - name: Install dependencies
+        run: uv sync
+      
+      # 安装 Playwright 浏览器 (用于 AnyRouter WAF bypass)
+      - name: Install Playwright browsers
+        run: uv run playwright install chromium
+      
+      # 执行签到
+      - name: Execute multi-platform check-in
+        env:
+          # LinuxDo 配置
+          USERNAME: ${{ secrets.USERNAME }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          LINUXDO_USERNAME: ${{ secrets.LINUXDO_USERNAME }}
+          LINUXDO_PASSWORD: ${{ secrets.LINUXDO_PASSWORD }}
+          BROWSE_ENABLED: ${{ secrets.BROWSE_ENABLED }}
+          
+          # AnyRouter 配置
+          ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
+          PROVIDERS: ${{ secrets.PROVIDERS }}
+          
+          # 通知配置 - Email
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          CUSTOM_SMTP_SERVER: ${{ secrets.CUSTOM_SMTP_SERVER }}
+          
+          # 通知配置 - Gotify
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
+          
+          # 通知配置 - Server酱³
+          SC3_PUSH_KEY: ${{ secrets.SC3_PUSH_KEY }}
+          
+          # 通知配置 - wxpush
+          WXPUSH_URL: ${{ secrets.WXPUSH_URL }}
+          WXPUSH_TOKEN: ${{ secrets.WXPUSH_TOKEN }}
+          
+          # 通知配置 - Telegram
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_USERID: ${{ secrets.TELEGRAM_USERID }}
+          
+          # 通知配置 - PushPlus
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          
+          # 通知配置 - Server酱 (旧版)
+          SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
+          
+          # 通知配置 - 钉钉
+          DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
+          
+          # 通知配置 - 飞书
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          
+          # 通知配置 - 企业微信
+          WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+          
+          # 通知配置 - Bark
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          BARK_SERVER: ${{ secrets.BARK_SERVER }}
+        run: |
+          if [ -n "${{ github.event.inputs.platform }}" ]; then
+            uv run python main.py --platform ${{ github.event.inputs.platform }}
+          else
+            uv run python main.py
+          fi
+
+      # 清理旧的工作流运行记录
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 10
+          keep_minimum_runs: 6
