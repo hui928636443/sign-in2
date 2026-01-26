@@ -153,18 +153,6 @@ class PlatformManager:
             logger.info("没有签到结果，跳过通知")
             return
         
-        success_count = sum(1 for r in self.results if r.is_success)
-        total_count = len(self.results)
-        has_failures = success_count < total_count
-        
-        # 检查是否有余额变化（AnyRouter）
-        has_balance_change = self._check_balance_change()
-        
-        # 只在有失败或余额变化时发送通知（除非强制）
-        if not force and not has_failures and not has_balance_change:
-            logger.info("全部成功且无余额变化，跳过通知")
-            return
-        
         # 格式化通知内容
         results_dicts = [r.to_dict() for r in self.results]
         title, content = NotificationManager.format_summary_message(results_dicts)

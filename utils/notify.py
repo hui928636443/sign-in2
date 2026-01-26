@@ -593,33 +593,60 @@ class NotificationManager:
         failed_count = sum(1 for r in results if r.get("status") == "failed")
         total_count = len(results)
         
+        # 按平台分组
+        linuxdo_results = [r for r in results if "LinuxDo" in r.get("platform", "")]
+        anyrouter_results = [r for r in results if "AnyRouter" in r.get("platform", "")]
+        
         # 标题
         if failed_count == 0:
-            title = f"✅ 多平台签到完成 ({success_count}/{total_count})"
+            title = "✅ 多平台签到完成"
         else:
-            title = f"⚠️ 多平台签到完成 ({success_count}/{total_count})"
+            title = "⚠️ 多平台签到完成"
         
         # 内容
         lines = [
-            f"签到时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"成功: {success_count} | 失败: {failed_count} | 总计: {total_count}",
+            f"[TIME] Execution time: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
             "",
-            "--- 详细结果 ---",
         ]
         
-        for result in results:
-            status = result.get("status", "unknown")
-            icon = {"success": "✅", "failed": "❌", "skipped": "⏭️"}.get(status, "ℹ️")
-            platform = result.get("platform", "Unknown")
-            account = result.get("account", "Unknown")
-            message = result.get("message", "")
-            
-            lines.append(f"{icon} [{platform}] {account}: {message}")
-            
-            # 添加余额信息
-            details = result.get("details", {})
-            if details and "balance" in details:
-                lines.append(f"   余额: {details['balance']}")
+        # AnyRouter 余额信息
+        if anyrouter_results:
+            for result in anyrouter_results:
+                details = result.get("details", {})
+                account = result.get("account", "Unknown")
+                status = result.get("status", "unknown")
+                
+                if status == "success" and details:
+                    balance = details.get("balance", "N/A")
+                    used = details.get("used", "N/A")
+                    lines.append(f"[BALANCE] {account}")
+                    lines.append(f":money: Current balance: {balance}, Used: {used}")
+                elif status == "failed":
+                    lines.append(f"[FAILED] {account}: {result.get('message', 'Unknown error')}")
+            lines.append("")
+        
+        # LinuxDo 结果
+        if linuxdo_results:
+            for result in linuxdo_results:
+                account = result.get("account", "Unknown")
+                status = result.get("status", "unknown")
+                message = result.get("message", "")
+                
+                if status == "success":
+                    lines.append(f"[LINUXDO] {account}: {message}")
+                elif status == "failed":
+                    lines.append(f"[FAILED] {account}: {message}")
+            lines.append("")
+        
+        # 统计信息
+        lines.append("[STATS] Check-in result statistics:")
+        lines.append(f"[SUCCESS] Success: {success_count}/{total_count}")
+        lines.append(f"[FAIL] Failed: {failed_count}/{total_count}")
+        
+        if failed_count == 0:
+            lines.append("[SUCCESS] All accounts check-in successful!")
+        else:
+            lines.append(f"[WARNING] {failed_count} account(s) failed!")
         
         content = "\n".join(lines)
         
