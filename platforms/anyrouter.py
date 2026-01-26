@@ -2,10 +2,10 @@
 """
 AnyRouter/AgentRouter 签到适配器
 
-从 anyrouter-check-in/checkin.py 迁移的签到逻辑，使用 Playwright + httpx。
+从 anyrouter-check-in/checkin.py 迁移的签到逻辑，使用 Patchright + httpx。
 
 Requirements:
-- 2.4: 保持 Playwright WAF bypass 逻辑
+- 2.4: 使用 Patchright (反检测 Playwright) 进行 WAF bypass
 - 2.6: 保持余额查询和变化检测功能
 """
 
@@ -15,7 +15,7 @@ from typing import Optional
 
 import httpx
 from loguru import logger
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 from platforms.base import BasePlatformAdapter, CheckinResult, CheckinStatus
 from utils.config import AnyRouterAccount, ProviderConfig
