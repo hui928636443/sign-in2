@@ -25,7 +25,7 @@ dependencies = [
     "playwright>=1.40.0",
     
     # HTTP clients
-    "httpx>=0.25.0",
+    "httpx[http2]>=0.25.0",
     "curl-cffi>=0.5.0",
     
     # Logging
