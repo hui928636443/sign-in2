@@ -35,6 +35,7 @@ jobs:
       - name: Execute LinuxDo check-in
         env:
           # LinuxDo 配置
+          LINUXDO_ACCOUNTS: ${{ secrets.LINUXDO_ACCOUNTS }}
           USERNAME: ${{ secrets.USERNAME }}
           PASSWORD: ${{ secrets.PASSWORD }}
           LINUXDO_USERNAME: ${{ secrets.LINUXDO_USERNAME }}
