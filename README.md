@@ -96,8 +96,8 @@
 
 1. 登录对应平台（anyrouter.top 或 wzw.pp.ua）
 2. 打开浏览器开发者工具 (F12)
-3. **Cookie**: Application
-```
+3. **Cookie**: Application → Cookies → 复制 `session` 的值
+4. **api_user**: Network → 任意请求 → Headers → 找到 `new-api-user`
 
 > ⚠️ **注意**: Cookie 会过期，过期后需要重新登录获取新的 session 值。
 
