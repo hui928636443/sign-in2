@@ -281,9 +281,13 @@ class LinuxDoAdapter(BasePlatformAdapter):
             logger.debug(f"模拟人类行为时出错: {e}")
     
     async def login(self) -> bool:
-        """执行登录操作 - 纯浏览器方式，绕过 Cloudflare"""
-        import json
+        """执行登录操作 - 浏览器过 CF + curl_cffi 登录
         
+        策略：
+        1. 用 Patchright 浏览器访问页面，通过 Cloudflare 验证
+        2. 同步 cf_clearance Cookie 到 curl_cffi session
+        3. 用 curl_cffi (impersonate) 发送登录请求
+        """
         # 启动前随机预热延迟（1-5秒），模拟人类打开浏览器的准备时间
         warmup_delay = random.uniform(1.0, 5.0)
         logger.debug(f"预热延迟 {warmup_delay:.1f} 秒...")
@@ -305,81 +309,11 @@ class LinuxDoAdapter(BasePlatformAdapter):
             logger.error("Cloudflare 验证超时")
             return False
         
-        # Step 3: 模拟人类行为，随机移动鼠标和滚动
+        # Step 3: 模拟人类行为
         await self._simulate_human_behavior()
         
-        # Step 4: 通过浏览器 JS 获取 CSRF Token 并执行登录
-        logger.info("通过浏览器执行登录...")
-        
-        # 安全转义用户名和密码，防止 JS 注入
-        safe_username = json.dumps(self.username)
-        safe_password = json.dumps(self.password)
-        
-        login_result = await self.page.evaluate(f"""
-            async () => {{
-                try {{
-                    // 获取 CSRF Token（必须携带 credentials 以传递 cf_clearance Cookie）
-                    const csrfResp = await fetch('/session/csrf', {{
-                        credentials: 'include',
-                        headers: {{
-                            'Accept': 'application/json',
-                            'X-Requested-With': 'XMLHttpRequest'
-                        }}
-                    }});
-                    
-                    if (!csrfResp.ok) {{
-                        return {{ success: false, error: 'CSRF 请求失败: ' + csrfResp.status }};
-                    }}
-                    
-                    const csrfData = await csrfResp.json();
-                    const csrfToken = csrfData.csrf;
-                    
-                    if (!csrfToken) {{
-                        return {{ success: false, error: 'CSRF Token 为空' }};
-                    }}
-                    
-                    // 执行登录（必须携带 credentials 以传递 cf_clearance Cookie）
-                    const loginResp = await fetch('/session', {{
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: {{
-                            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                            'X-CSRF-Token': csrfToken,
-                            'X-Requested-With': 'XMLHttpRequest'
-                        }},
-                        body: new URLSearchParams({{
-                            'login': {safe_username},
-                            'password': {safe_password},
-                            'second_factor_method': '1',
-                            'timezone': 'Asia/Shanghai'
-                        }})
-                    }});
-                    
-                    if (!loginResp.ok) {{
-                        return {{ success: false, error: '登录请求失败: ' + loginResp.status }};
-                    }}
-                    
-                    const loginData = await loginResp.json();
-                    
-                    if (loginData.error) {{
-                        return {{ success: false, error: loginData.error }};
-                    }}
-                    
-                    return {{ success: true, user: loginData.user || {{}} }};
-                }} catch (e) {{
-                    return {{ success: false, error: e.message }};
-                }}
-            }}
-        """)
-        
-        if not login_result or not login_result.get("success"):
-            error_msg = login_result.get("error", "未知错误") if login_result else "JS 执行失败"
-            logger.error(f"登录失败: {error_msg}")
-            return False
-        
-        logger.info("登录成功!")
-        
-        # Step 3: 同步浏览器 Cookie 到 curl_cffi session（用于后续 API 请求）
+        # Step 4: 同步浏览器 Cookie 到 curl_cffi session（关键：cf_clearance）
+        logger.info("同步 Cookie 到 curl_cffi...")
         browser_cookies = await self.context.cookies()
         for cookie in browser_cookies:
             if "linux.do" in cookie.get("domain", ""):
@@ -388,6 +322,80 @@ class LinuxDoAdapter(BasePlatformAdapter):
                     cookie["value"], 
                     domain=cookie.get("domain", ".linux.do")
                 )
+        
+        # 额外等待确保 Cookie 生效
+        await asyncio.sleep(2)
+        
+        # Step 5: 用 curl_cffi 获取 CSRF Token
+        logger.info("获取 CSRF Token...")
+        headers = {
+            "User-Agent": self._user_agent,
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": LOGIN_URL,
+        }
+        
+        try:
+            resp_csrf = self.session.get(
+                CSRF_URL, headers=headers, impersonate="chrome136"
+            )
+            if resp_csrf.status_code != 200:
+                logger.error(f"CSRF 请求失败: {resp_csrf.status_code}")
+                return False
+            csrf_data = resp_csrf.json()
+            csrf_token = csrf_data.get("csrf")
+            if not csrf_token:
+                logger.error("CSRF Token 为空")
+                return False
+            logger.info(f"CSRF Token 获取成功: {csrf_token[:10]}...")
+        except Exception as e:
+            logger.error(f"获取 CSRF Token 失败: {e}")
+            return False
+        
+        # Step 6: 用 curl_cffi 执行登录
+        logger.info("执行登录...")
+        headers.update({
+            "X-CSRF-Token": csrf_token,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Origin": "https://linux.do",
+        })
+        
+        data = {
+            "login": self.username,
+            "password": self.password,
+            "second_factor_method": "1",
+            "timezone": "Asia/Shanghai",
+        }
+        
+        try:
+            resp_login = self.session.post(
+                SESSION_URL, data=data, headers=headers, impersonate="chrome136"
+            )
+            
+            if resp_login.status_code != 200:
+                logger.error(f"登录请求失败: {resp_login.status_code}")
+                return False
+            
+            login_data = resp_login.json()
+            if login_data.get("error"):
+                logger.error(f"登录失败: {login_data.get('error')}")
+                return False
+            
+            logger.info("登录成功!")
+        except Exception as e:
+            logger.error(f"登录请求异常: {e}")
+            return False
+        
+        # Step 7: 同步登录后的 Cookie 回浏览器（用于后续浏览帖子）
+        cookies_dict = self.session.cookies.get_dict()
+        for name, value in cookies_dict.items():
+            await self.context.add_cookies([{
+                "name": name,
+                "value": value,
+                "domain": ".linux.do",
+                "path": "/",
+            }])
         
         # 刷新页面确保登录状态生效
         await self.page.goto(HOME_URL, wait_until="domcontentloaded")
