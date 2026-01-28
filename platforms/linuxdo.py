@@ -318,8 +318,9 @@ class LinuxDoAdapter(BasePlatformAdapter):
         login_result = await self.page.evaluate(f"""
             async () => {{
                 try {{
-                    // 获取 CSRF Token
+                    // 获取 CSRF Token（必须携带 credentials 以传递 cf_clearance Cookie）
                     const csrfResp = await fetch('/session/csrf', {{
+                        credentials: 'include',
                         headers: {{
                             'Accept': 'application/json',
                             'X-Requested-With': 'XMLHttpRequest'
@@ -337,9 +338,10 @@ class LinuxDoAdapter(BasePlatformAdapter):
                         return {{ success: false, error: 'CSRF Token 为空' }};
                     }}
                     
-                    // 执行登录
+                    // 执行登录（必须携带 credentials 以传递 cf_clearance Cookie）
                     const loginResp = await fetch('/session', {{
                         method: 'POST',
+                        credentials: 'include',
                         headers: {{
                             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
                             'X-CSRF-Token': csrfToken,
