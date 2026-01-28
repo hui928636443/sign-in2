@@ -99,7 +99,7 @@ class PlatformManager:
         - 串行执行而非并发，避免同一时间多账号活动被关联
         - 账号执行顺序随机化，避免固定模式
         - 账号间添加随机间隔（10-30秒），模拟不同用户
-        - 每个账号浏览时长随机 20-40 分钟
+        - 浏览时长根据账号等级调整：1级~80分钟，2级~40分钟，3级~20分钟
         """
         if not self.config.linuxdo_accounts:
             logger.warning("LinuxDo 未配置")
@@ -116,15 +116,18 @@ class PlatformManager:
         for order, (original_index, account) in enumerate(accounts_with_index):
             logger.info(f"开始执行 LinuxDo 账号 {order + 1}/{total_accounts}: {account.get_display_name(original_index)}")
 
-            # 随机化浏览时长：50-70 分钟（3000-4200秒）
-            randomized_duration = random.randint(3000, 4200)
-            logger.info(f"本次浏览目标时长: {randomized_duration // 60} 分 {randomized_duration % 60} 秒")
+            # 根据账号等级获取浏览时长配置
+            level_config = LinuxDoAdapter.LEVEL_CONFIGS.get(account.level, LinuxDoAdapter.LEVEL_CONFIGS[2])
+            randomized_duration = random.randint(level_config["duration_min"], level_config["duration_max"])
+            level_names = {1: "激进", 2: "中等", 3: "保守"}
+            logger.info(f"本次浏览目标时长: {randomized_duration // 60} 分 {randomized_duration % 60} 秒，等级: {account.level}({level_names.get(account.level, '未知')})")
 
             adapter = LinuxDoAdapter(
                 username=account.username,
                 password=account.password,
                 browse_enabled=account.browse_enabled,
                 browse_duration=randomized_duration,
+                level=account.level,
                 account_name=account.get_display_name(original_index),
             )
 

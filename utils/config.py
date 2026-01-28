@@ -25,12 +25,19 @@ from loguru import logger
 
 @dataclass
 class LinuxDoAccount:
-    """LinuxDo 账号配置"""
+    """LinuxDo 账号配置
+    
+    level 字段说明：
+    - 1: 激进模式（1级号），刷帖速度快，适合新号快速升级
+    - 2: 中等模式（2级号），平衡速度和安全
+    - 3: 保守模式（3级号），慢速浏览，适合高等级号保号
+    """
     
     username: str
     password: str
     browse_enabled: bool = True
     browse_duration: int = 120  # 浏览时长（秒），默认 2 分钟
+    level: int = 2  # 账号等级，1=激进，2=中等，3=保守
     name: Optional[str] = None
     
     @classmethod
@@ -45,12 +52,19 @@ class LinuxDoAccount:
         if isinstance(browse_duration, str):
             browse_duration = int(browse_duration)
         
+        # 账号等级，默认 2（中等）
+        level = data.get("level", 2)
+        if isinstance(level, str):
+            level = int(level)
+        level = max(1, min(3, level))  # 限制在 1-3 范围内
+        
         name = data.get("name") or f"Account {index + 1}"
         return cls(
             username=data["username"],
             password=data["password"],
             browse_enabled=browse_enabled,
             browse_duration=browse_duration,
+            level=level,
             name=name,
         )
     
