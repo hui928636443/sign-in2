@@ -571,8 +571,6 @@ class AppConfig:
             logger.info(f"成功加载 LinuxDO 账号: {username} (签到所有站点)")
         
         return accounts
-        
-        return accounts
     
     @classmethod
     def _load_anyrouter_accounts(cls) -> List[AnyRouterAccount]:

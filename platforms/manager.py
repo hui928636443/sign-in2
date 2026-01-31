@@ -351,8 +351,6 @@ class PlatformManager:
                     ))
         
         return results
-        
-        return results
     
     async def _run_all_anyrouter(self) -> list[CheckinResult]:
         """运行所有 ANYROUTER_ACCOUNTS 账号签到，根据 provider 自动选择适配器"""
