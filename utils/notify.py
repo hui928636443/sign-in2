@@ -701,14 +701,15 @@ class NotificationManager:
                 details = result.get("details") or {}
                 account = result.get("account", "Unknown")
                 status = result.get("status", "unknown")
+                balance = details.get("balance")
+                used = details.get("used")
 
                 if i > 0:
                     html_parts.append('<div style="height: 1px; background: #F5F5F7; margin: 16px 0;"></div>')
 
-                if status == "success":
-                    balance = details.get("balance", "N/A")
-                    used = details.get("used", "N/A")
-                    lines.append(f"[{display_name}] {account}: {balance}, 已使用: {used}")
+                # 有余额信息就显示余额（无论成功还是失败）
+                if balance:
+                    lines.append(f"[{display_name}] {account}: {balance}, 已使用: {used or 'N/A'}")
                     html_parts.append(f'''
         <div>
             <div style="font-size: 13px; color: #86868B; margin-bottom: 6px;">{account}</div>
@@ -718,12 +719,13 @@ class NotificationManager:
                     <span style="font-size: 13px; color: #86868B; margin-left: 4px;">余额</span>
                 </div>
                 <div style="text-align: right;">
-                    <span style="font-size: 17px; color: #FF9500;">{used}</span>
+                    <span style="font-size: 17px; color: #FF9500;">{used or "N/A"}</span>
                     <span style="font-size: 13px; color: #86868B; margin-left: 4px;">已用</span>
                 </div>
             </div>
         </div>''')
                 else:
+                    # 没有余额信息才显示错误
                     msg = result.get('message', '未知错误')
                     lines.append(f"[{display_name}] {account}: ❌ {msg}")
                     html_parts.append(f'''

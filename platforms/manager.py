@@ -212,9 +212,21 @@ class PlatformManager:
                     if resp.status_code == 200:
                         try:
                             result = resp.json()
+                            msg = result.get("message") or result.get("msg") or ""
+                            
                             # 检查各种成功标志
                             if result.get("success") or result.get("ret") == 1 or result.get("code") == 0:
-                                msg = result.get("message") or result.get("msg") or "签到成功"
+                                msg = msg or "签到成功"
+                                logger.success(f"[{account_name}] {msg}")
+                                return CheckinResult(
+                                    platform=f"NewAPI ({provider.name})",
+                                    account=account_name,
+                                    status=CheckinStatus.SUCCESS,
+                                    message=msg,
+                                    details=details if details else None,
+                                )
+                            # "今日已签到" 也视为成功（只是今天已经签过了）
+                            elif "已签到" in msg or "已经签到" in msg:
                                 logger.success(f"[{account_name}] {msg}")
                                 return CheckinResult(
                                     platform=f"NewAPI ({provider.name})",
@@ -224,7 +236,7 @@ class PlatformManager:
                                     details=details if details else None,
                                 )
                             else:
-                                error_msg = result.get("message") or result.get("msg") or "签到失败"
+                                error_msg = msg or "签到失败"
                                 logger.warning(f"[{account_name}] {error_msg}")
                                 return CheckinResult(
                                     platform=f"NewAPI ({provider.name})",
