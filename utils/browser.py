@@ -654,15 +654,21 @@ class BrowserManager:
             ])
             logger.debug("CI 环境检测到，添加额外稳定性参数")
 
-        # Requirement 8.1: 当 DISPLAY 设置时（Xvfb 可用），使用非 headless 模式
-        # headless 模式容易被反爬虫系统检测，使用 Xvfb 虚拟显示可以绕过检测
-        use_headless = self.headless and not display_set
-
-        if display_set and self.headless:
-            logger.info(
-                f"检测到 DISPLAY={os.environ.get('DISPLAY')}，"
-                f"切换到非 headless 模式（使用 Xvfb 虚拟显示）"
-            )
+        # Requirement 8.1: 在 CI 环境中使用 headless 模式更稳定
+        # 虽然 headless 模式容易被反爬虫检测，但在 CI 环境中连接稳定性更重要
+        # 新版 Chrome 的 --headless=new 模式已经大大改善了检测问题
+        if is_ci:
+            # CI 环境强制使用 headless 模式，避免 Xvfb 连接问题
+            use_headless = True
+            logger.info("CI 环境检测到，强制使用 headless 模式以确保连接稳定性")
+        else:
+            # 本地环境：当 DISPLAY 设置时使用非 headless 模式
+            use_headless = self.headless and not display_set
+            if display_set and self.headless:
+                logger.info(
+                    f"检测到 DISPLAY={os.environ.get('DISPLAY')}，"
+                    f"切换到非 headless 模式（使用 Xvfb 虚拟显示）"
+                )
 
         # Requirement 8.2: 在 CI 环境或 root 用户下，必须设置 sandbox=False
         # Chrome 的沙箱机制在 CI 环境（如 GitHub Actions）中经常无法正常工作
@@ -713,6 +719,11 @@ class BrowserManager:
             )
 
             self._nodriver_browser = await uc.start(config=config)
+
+            # CI 环境中等待浏览器完全启动
+            if is_ci:
+                logger.info("CI 环境：等待浏览器完全启动...")
+                await asyncio.sleep(2)
         except Exception as e:
             # 构建详细的环境信息用于调试
             env_info = self._build_environment_info(
