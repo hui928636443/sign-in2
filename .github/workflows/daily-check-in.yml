@@ -12,7 +12,6 @@ on:
         type: choice
         options:
           - ''
-          - linuxdo
           - newapi
 
 jobs:
@@ -68,9 +67,6 @@ jobs:
           
           # WONG 公益站配置
           WONG_ACCOUNTS: ${{ secrets.WONG_ACCOUNTS }}
-          
-          # LinuxDO 统一账号配置
-          LINUXDO_ACCOUNTS: ${{ secrets.LINUXDO_ACCOUNTS }}
           
           # 通知配置 - Email
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
