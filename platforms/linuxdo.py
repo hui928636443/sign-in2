@@ -88,10 +88,15 @@ class LinuxDOAdapter(BasePlatformAdapter):
         self._browser_manager = BrowserManager(engine=engine, headless=headless)
         await self._browser_manager.start()
 
+        # 获取实际使用的引擎（可能因为 CI 环境回退而改变）
+        actual_engine = self._browser_manager.engine
+        if actual_engine != engine:
+            logger.info(f"[{self.account_name}] 引擎已回退: {engine} -> {actual_engine}")
+
         try:
-            if engine == "nodriver":
+            if actual_engine == "nodriver":
                 return await self._login_nodriver()
-            elif engine == "drissionpage":
+            elif actual_engine == "drissionpage":
                 return await self._login_drissionpage()
             else:
                 return await self._login_playwright()
