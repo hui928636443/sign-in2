@@ -664,12 +664,15 @@ class BrowserManager:
                 f"切换到非 headless 模式（使用 Xvfb 虚拟显示）"
             )
 
-        # Requirement 8.2: 当以 root 用户运行时，必须设置 sandbox=False
-        # Chrome 的沙箱机制在 root 用户下无法正常工作
-        use_sandbox = not is_root
+        # Requirement 8.2: 在 CI 环境或 root 用户下，必须设置 sandbox=False
+        # Chrome 的沙箱机制在 CI 环境（如 GitHub Actions）中经常无法正常工作
+        # 即使不是 root 用户，CI 环境的容器/虚拟机也可能缺少必要的内核功能
+        use_sandbox = not (is_root or is_ci)
 
         if is_root:
             logger.info("检测到 root 用户，设置 sandbox=False")
+        elif is_ci:
+            logger.info("检测到 CI 环境，设置 sandbox=False 以确保兼容性")
 
         # Requirement 8.4: 提供清晰的错误消息
         # 尝试启动浏览器，捕获并提供有用的错误信息
