@@ -12,19 +12,32 @@ NewAPI 站点浏览器自动签到模块
 - 使用 JS 直接赋值填写表单（而不是 send_keys）
 - 先访问首页通过 Cloudflare，再访问登录页
 - 使用 BrowserManager 管理浏览器
+
+Debug 模式：
+- 设置环境变量 DEBUG=true 或 NEWAPI_DEBUG=true 开启
+- 开启后会保存截图、打印详细日志
 """
 
 import asyncio
 import json
 import os
+from datetime import datetime
+from pathlib import Path
 
 import httpx
-import nodriver as uc
 from loguru import logger
 
 from platforms.base import CheckinResult, CheckinStatus
 from utils.browser import BrowserManager, get_browser_engine
 from utils.config import DEFAULT_PROVIDERS, ProviderConfig
+
+
+def is_debug_mode() -> bool:
+    """检查是否开启 debug 模式"""
+    return (
+        os.environ.get("DEBUG", "").lower() in ("true", "1", "yes") or
+        os.environ.get("NEWAPI_DEBUG", "").lower() in ("true", "1", "yes")
+    )
 
 
 class NewAPIBrowserCheckin:
@@ -62,6 +75,14 @@ class NewAPIBrowserCheckin:
         self._api_user: str | None = None
         self._login_method: str = "unknown"
 
+        # Debug 模式
+        self._debug = is_debug_mode()
+        self._debug_dir: Path | None = None
+        if self._debug:
+            self._debug_dir = Path("debug_screenshots")
+            self._debug_dir.mkdir(exist_ok=True)
+            logger.info(f"[{self._account_name}] Debug 模式已开启，截图保存到: {self._debug_dir}")
+
     def _parse_cookies(self, cookies: dict | str | None) -> dict:
         """解析 Cookie 为字典格式"""
         if not cookies:
@@ -81,6 +102,30 @@ class NewAPIBrowserCheckin:
     def account_name(self) -> str:
         return self._account_name
 
+    async def _save_debug_screenshot(self, tab, name: str) -> None:
+        """保存调试截图（仅在 debug 模式下）"""
+        if not self._debug or not self._debug_dir:
+            return
+        try:
+            timestamp = datetime.now().strftime("%H%M%S")
+            filename = f"{self._account_name}_{timestamp}_{name}.png"
+            filepath = self._debug_dir / filename
+            await tab.save_screenshot(str(filepath))
+            logger.debug(f"[{self._account_name}] 截图已保存: {filepath}")
+        except Exception as e:
+            logger.debug(f"[{self._account_name}] 截图保存失败: {e}")
+
+    async def _log_page_info(self, tab, context: str) -> None:
+        """记录页面信息（仅在 debug 模式下）"""
+        if not self._debug:
+            return
+        try:
+            url = tab.target.url if hasattr(tab, 'target') else "unknown"
+            title = await tab.evaluate("document.title") or "unknown"
+            logger.debug(f"[{self._account_name}] [{context}] URL: {url}, Title: {title}")
+        except Exception as e:
+            logger.debug(f"[{self._account_name}] [{context}] 获取页面信息失败: {e}")
+
     async def _checkin_with_cookies(self, session_cookie: str, api_user: str) -> tuple[bool, str, dict]:
         """使用 Cookie 方式签到（HTTP 请求）"""
         details = {}
@@ -97,9 +142,9 @@ class NewAPIBrowserCheckin:
                 # 获取用户信息
                 user_info_url = f"{self.provider.domain}{self.provider.user_info_path}"
                 logger.info(f"[{self.account_name}] 获取用户信息: {user_info_url}")
-                
+
                 response = await client.get(user_info_url, headers=headers)
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("success"):
@@ -120,9 +165,9 @@ class NewAPIBrowserCheckin:
                 if self.provider.needs_manual_check_in():
                     checkin_url = f"{self.provider.domain}{self.provider.sign_in_path}"
                     logger.info(f"[{self.account_name}] 执行签到: {checkin_url}")
-                    
+
                     response = await client.post(checkin_url, headers=headers)
-                    
+
                     if response.status_code == 200:
                         data = response.json()
                         msg = data.get("message") or data.get("msg") or ""
@@ -157,14 +202,18 @@ class NewAPIBrowserCheckin:
 
                 if not is_cf_page and title:
                     logger.success(f"[{self.account_name}] Cloudflare 验证通过！")
+                    await self._save_debug_screenshot(tab, "cf_passed")
                     return True
                 if is_cf_page:
                     logger.debug(f"[{self.account_name}] 等待 Cloudflare... 标题: {title}")
+                    if self._debug:
+                        await self._save_debug_screenshot(tab, "cf_waiting")
             except Exception as e:
                 logger.debug(f"[{self.account_name}] 检查页面状态出错: {e}")
             await asyncio.sleep(2)
 
         logger.warning(f"[{self.account_name}] Cloudflare 验证超时")
+        await self._save_debug_screenshot(tab, "cf_timeout")
         return False
 
     async def _login_linuxdo(self, tab) -> bool:
@@ -172,6 +221,7 @@ class NewAPIBrowserCheckin:
         # 1. 先访问首页，让 Cloudflare 验证
         logger.info(f"[{self.account_name}] 访问 LinuxDO 首页...")
         await tab.get(self.LINUXDO_URL)
+        await self._log_page_info(tab, "linuxdo_home")
 
         # 2. 等待 Cloudflare 挑战完成
         cf_passed = await self._wait_for_cloudflare(tab, timeout=30)
@@ -181,6 +231,7 @@ class NewAPIBrowserCheckin:
             cf_passed = await self._wait_for_cloudflare(tab, timeout=20)
             if not cf_passed:
                 logger.error(f"[{self.account_name}] Cloudflare 验证失败")
+                await self._save_debug_screenshot(tab, "linuxdo_cf_failed")
                 return False
 
         # 检查是否已经登录
@@ -193,6 +244,7 @@ class NewAPIBrowserCheckin:
             """)
             if is_logged_in:
                 logger.success(f"[{self.account_name}] LinuxDO 已登录")
+                await self._save_debug_screenshot(tab, "linuxdo_already_logged")
                 return True
         except Exception:
             pass
@@ -201,6 +253,8 @@ class NewAPIBrowserCheckin:
         logger.info(f"[{self.account_name}] 访问登录页面...")
         await tab.get(self.LINUXDO_LOGIN_URL)
         await asyncio.sleep(5)
+        await self._log_page_info(tab, "linuxdo_login_page")
+        await self._save_debug_screenshot(tab, "linuxdo_login_page")
 
         # 4. 等待登录表单加载
         for _ in range(10):
@@ -227,21 +281,21 @@ class NewAPIBrowserCheckin:
                     const usernameInput = document.querySelector('#login-account-name');
                     const passwordInput = document.querySelector('#login-account-password');
                     if (!usernameInput || !passwordInput) return 'error: inputs not found';
-                    
+
                     usernameInput.focus();
                     usernameInput.value = '{escaped_username}';
                     usernameInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     usernameInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    
+
                     passwordInput.focus();
                     passwordInput.value = '{escaped_password}';
                     passwordInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     passwordInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    
+
                     return 'success';
                 }})()
             """)
-            
+
             if fill_result != 'success':
                 logger.error(f"[{self.account_name}] 填写表单失败: {fill_result}")
                 return False
@@ -252,6 +306,7 @@ class NewAPIBrowserCheckin:
 
         # 6. 点击登录按钮
         logger.info(f"[{self.account_name}] 点击登录按钮...")
+        await self._save_debug_screenshot(tab, "before_login_click")
         await asyncio.sleep(1)
         try:
             clicked = await tab.evaluate("""
@@ -263,6 +318,7 @@ class NewAPIBrowserCheckin:
             """)
             if not clicked:
                 logger.error(f"[{self.account_name}] 未找到登录按钮")
+                await self._save_debug_screenshot(tab, "login_button_not_found")
                 return False
         except Exception as e:
             logger.error(f"[{self.account_name}] 点击登录失败: {e}")
@@ -288,21 +344,26 @@ class NewAPIBrowserCheckin:
                     """)
                     if error_msg:
                         logger.error(f"[{self.account_name}] 登录错误: {error_msg}")
+                        await self._save_debug_screenshot(tab, "login_error")
                         return False
                 except Exception:
                     pass
 
             if i % 10 == 0:
                 logger.debug(f"[{self.account_name}] 等待登录... ({i}s)")
+                if self._debug and i > 0:
+                    await self._save_debug_screenshot(tab, f"login_waiting_{i}s")
 
         await asyncio.sleep(2)
         current_url = tab.target.url if hasattr(tab, 'target') else ""
 
         if "login" in current_url.lower():
             logger.error(f"[{self.account_name}] 登录失败，仍在登录页面")
+            await self._save_debug_screenshot(tab, "login_failed_still_on_page")
             return False
 
         logger.success(f"[{self.account_name}] LinuxDO 登录成功！")
+        await self._save_debug_screenshot(tab, "linuxdo_login_success")
         return True
 
     async def _oauth_login_and_get_session(self, tab) -> tuple[str | None, str | None]:
@@ -312,12 +373,15 @@ class NewAPIBrowserCheckin:
 
         await tab.get(login_url)
         await asyncio.sleep(5)
+        await self._log_page_info(tab, "provider_login_page")
+        await self._save_debug_screenshot(tab, "provider_login_page")
         await self._wait_for_cloudflare(tab, timeout=15)
 
         # 检查是否已经登录
         current_url = tab.target.url if hasattr(tab, 'target') else ""
         if self.provider.domain in current_url and "login" not in current_url.lower():
             logger.success(f"[{self.account_name}] 已登录，直接获取 session")
+            await self._save_debug_screenshot(tab, "already_logged_in")
             return await self._extract_session_from_browser(tab)
 
         # 等待页面加载并查找 LinuxDO 按钮
@@ -325,11 +389,12 @@ class NewAPIBrowserCheckin:
         await asyncio.sleep(3)
 
         # 打印页面内容帮助调试
-        try:
-            page_text = await tab.evaluate("document.body.innerText.substring(0, 500)")
-            logger.debug(f"[{self.account_name}] 页面内容: {page_text[:200]}...")
-        except Exception:
-            pass
+        if self._debug:
+            try:
+                page_text = await tab.evaluate("document.body.innerText.substring(0, 500)")
+                logger.debug(f"[{self.account_name}] 页面内容: {page_text[:200]}...")
+            except Exception:
+                pass
 
         # 点击 LinuxDO OAuth 按钮
         for attempt in range(5):
@@ -349,11 +414,14 @@ class NewAPIBrowserCheckin:
                 """)
                 if clicked:
                     logger.info(f"[{self.account_name}] 点击了 OAuth 按钮: {clicked}")
+                    await self._save_debug_screenshot(tab, "oauth_button_clicked")
                     break
                 logger.debug(f"[{self.account_name}] 第 {attempt + 1} 次尝试未找到 OAuth 按钮")
             except Exception as e:
                 logger.debug(f"[{self.account_name}] 查找 OAuth 按钮出错: {e}")
             await asyncio.sleep(1)
+        else:
+            await self._save_debug_screenshot(tab, "oauth_button_not_found")
 
         # 等待 OAuth 授权
         logger.info(f"[{self.account_name}] 等待 OAuth 授权...")
@@ -383,6 +451,7 @@ class NewAPIBrowserCheckin:
             # 如果在授权页面，点击允许
             if "linux.do" in current_url and ("authorize" in current_url.lower() or "oauth" in current_url.lower()):
                 logger.info(f"[{self.account_name}] 检测到授权页面，尝试点击允许...")
+                await self._save_debug_screenshot(tab, "oauth_authorize_page")
                 await asyncio.sleep(2)
                 try:
                     clicked = await tab.evaluate("""
@@ -409,13 +478,17 @@ class NewAPIBrowserCheckin:
                 t_url = t.target.url if hasattr(t, 'target') else ""
                 if self.provider.domain in t_url and "login" not in t_url.lower():
                     await t.bring_to_front()
+                    await self._save_debug_screenshot(t, "oauth_success")
                     return await self._extract_session_from_browser(t)
 
             await asyncio.sleep(1)
             if i % 5 == 0 and i > 0:
                 logger.debug(f"[{self.account_name}] 等待 OAuth 完成... ({i}s)")
+                if self._debug:
+                    await self._save_debug_screenshot(tab, f"oauth_waiting_{i}s")
 
         logger.error(f"[{self.account_name}] OAuth 登录超时")
+        await self._save_debug_screenshot(tab, "oauth_timeout")
         return None, None
 
     async def _extract_session_from_browser(self, tab) -> tuple[str | None, str | None]:
@@ -426,7 +499,7 @@ class NewAPIBrowserCheckin:
         try:
             import nodriver.cdp.network as cdp_network
             all_cookies = await tab.send(cdp_network.get_all_cookies())
-            
+
             for cookie in all_cookies:
                 if cookie.name == "session":
                     session_cookie = cookie.value
@@ -437,7 +510,7 @@ class NewAPIBrowserCheckin:
 
             if not api_user:
                 api_user = await tab.evaluate(f'''
-                    localStorage.getItem("{self.provider.api_user_key}") || 
+                    localStorage.getItem("{self.provider.api_user_key}") ||
                     localStorage.getItem("user_id")
                 ''')
                 if api_user:
@@ -457,7 +530,7 @@ class NewAPIBrowserCheckin:
                 if session_cookie:
                     logger.info(f"[{self.account_name}] 尝试使用预设 Cookie 签到...")
                     success, message, details = await self._checkin_with_cookies(session_cookie, self._preset_api_user)
-                    
+
                     if success:
                         self._login_method = "cookie"
                         details["login_method"] = "cookie"
@@ -489,14 +562,14 @@ class NewAPIBrowserCheckin:
 
             # 启动浏览器（参考 linuxdo.py 使用 BrowserManager）
             logger.info(f"[{self.account_name}] 启动浏览器进行 OAuth 登录...")
-            
+
             is_ci = bool(os.environ.get("CI")) or bool(os.environ.get("GITHUB_ACTIONS"))
             display_set = bool(os.environ.get("DISPLAY"))
-            
+
             # 默认使用非 headless 模式（更容易绕过 Cloudflare）
             # 只有明确设置 BROWSER_HEADLESS=true 才使用 headless
             headless = os.environ.get("BROWSER_HEADLESS", "false").lower() == "true"
-            
+
             if is_ci and display_set:
                 headless = False
                 logger.info(f"[{self.account_name}] CI 环境使用非 headless 模式")
@@ -519,7 +592,7 @@ class NewAPIBrowserCheckin:
 
             # OAuth 登录并获取 session
             session_cookie, api_user = await self._oauth_login_and_get_session(tab)
-            
+
             if not session_cookie or not api_user:
                 return CheckinResult(
                     platform=f"NewAPI ({self.provider_name})",
@@ -531,7 +604,7 @@ class NewAPIBrowserCheckin:
             # 3. 使用新获取的 session 签到
             logger.info(f"[{self.account_name}] 使用新 session 签到...")
             success, message, details = await self._checkin_with_cookies(session_cookie, api_user)
-            
+
             self._login_method = "oauth"
             details["login_method"] = "oauth"
             details["new_session"] = session_cookie[:20] + "..."
@@ -582,7 +655,7 @@ async def browser_checkin_newapi(
 
 def load_linuxdo_accounts(config_path: str = "签到账户/签到账户linuxdo.json") -> list[dict]:
     """从配置文件加载 LinuxDO 账户
-    
+
     配置格式：
     [
         {

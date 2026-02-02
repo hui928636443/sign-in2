@@ -5,6 +5,16 @@ on:
     - cron: '0 0,12 * * *'  # 每天 2 次（UTC 0点和12点，即北京时间 8点和20点）
 
   workflow_dispatch:
+    inputs:
+      platform:
+        description: '指定平台（留空运行全部）'
+        required: false
+        type: string
+      debug:
+        description: '开启 Debug 模式（截图+详细日志）'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   checkin:
@@ -48,6 +58,10 @@ jobs:
           # patchright: 反检测 Chromium（备用）
           BROWSER_ENGINE: nodriver
           DISPLAY: ":99"
+          
+          # Debug 模式（设置为 true 开启截图和详细日志）
+          # DEBUG: "true"
+          NEWAPI_DEBUG: ${{ github.event.inputs.debug || 'false' }}
           
           # NewAPI 站点统一配置（支持所有 NewAPI 架构的站点）
           # JSON 格式: [{"name": "账号名", "provider": "站点ID", "cookies": {"session": "xxx"}, "api_user": "123"}]
@@ -111,6 +125,16 @@ jobs:
             xvfb-run --server-args="-screen 0 1920x1080x24" uv run python main.py
           fi
 
+
+      # 上传 Debug 截图（仅在 debug 模式下）
+      - name: Upload debug screenshots
+        if: ${{ github.event.inputs.debug == 'true' && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug_screenshots/
+          retention-days: 3
+          if-no-files-found: ignore
 
       # 清理旧的工作流运行记录
       - name: Delete workflow runs
