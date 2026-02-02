@@ -515,25 +515,77 @@ class NewAPIBrowserCheckin:
                 logger.info(f"[{self.account_name}] 检测到授权页面，尝试点击允许...")
                 await self._save_debug_screenshot(tab, "oauth_authorize_page")
                 await asyncio.sleep(2)
+
+                # Debug: 打印页面上所有按钮
+                if self._debug:
+                    try:
+                        buttons_info = await tab.evaluate("""
+                            (function() {
+                                const results = [];
+                                const buttons = document.querySelectorAll('button, a, input[type="submit"], [role="button"]');
+                                for (const btn of buttons) {
+                                    results.push({
+                                        tag: btn.tagName,
+                                        text: (btn.innerText || btn.value || '').trim().substring(0, 30),
+                                        class: btn.className.substring(0, 50)
+                                    });
+                                }
+                                return JSON.stringify(results);
+                            })()
+                        """)
+                        logger.debug(f"[{self.account_name}] 授权页面按钮: {buttons_info}")
+                    except Exception as e:
+                        logger.debug(f"[{self.account_name}] 获取按钮信息失败: {e}")
+
                 try:
-                    clicked = await tab.evaluate("""
+                    # 改进的按钮查找逻辑：支持多种匹配方式
+                    clicked = await tab.evaluate(r"""
                         (function() {
-                            const els = document.querySelectorAll('button, a, input[type="submit"]');
-                            for (const el of els) {
-                                const text = (el.innerText || el.value || '').trim();
-                                if (text === '允许' || text.includes('允许')) {
-                                    el.click();
-                                    return 'clicked: ' + text;
+                            // 查找所有可能的按钮元素
+                            const buttons = document.querySelectorAll('button, a, input[type="submit"], [role="button"]');
+
+                            for (const btn of buttons) {
+                                const text = (btn.innerText || btn.value || btn.textContent || '').trim();
+                                const className = btn.className || '';
+
+                                // 匹配"允许"按钮（可能有各种写法）
+                                if (/^允许$/.test(text) ||
+                                    /允许/.test(text) ||
+                                    /authorize/i.test(text) ||
+                                    /allow/i.test(text) ||
+                                    /confirm/i.test(text) ||
+                                    /accept/i.test(text)) {
+                                    btn.click();
+                                    return 'clicked button: ' + text;
+                                }
+
+                                // 匹配红色/危险按钮（LinuxDO 授权页面的允许按钮是红色的 btn-danger）
+                                if (className.includes('btn-danger') || className.includes('btn-primary')) {
+                                    btn.click();
+                                    return 'clicked danger/primary button: ' + text;
                                 }
                             }
+
+                            // 如果还没找到，尝试查找表单提交按钮
+                            const form = document.querySelector('form');
+                            if (form) {
+                                const submitBtn = form.querySelector('button[type="submit"], input[type="submit"]');
+                                if (submitBtn) {
+                                    submitBtn.click();
+                                    return 'clicked form submit: ' + (submitBtn.innerText || submitBtn.value || '');
+                                }
+                            }
+
                             return null;
                         })()
                     """)
                     if clicked:
                         logger.info(f"[{self.account_name}] {clicked}")
                         await asyncio.sleep(3)
-                except Exception:
-                    pass
+                    else:
+                        logger.warning(f"[{self.account_name}] 未找到允许按钮")
+                except Exception as e:
+                    logger.warning(f"[{self.account_name}] 点击允许按钮失败: {e}")
 
             # 检查所有标签页是否有已登录的
             for t in browser.tabs:
@@ -562,21 +614,71 @@ class NewAPIBrowserCheckin:
             import nodriver.cdp.network as cdp_network
             all_cookies = await tab.send(cdp_network.get_all_cookies())
 
+            # Debug: 打印所有 cookies
+            if self._debug:
+                cookie_names = [c.name for c in all_cookies]
+                logger.debug(f"[{self.account_name}] 所有 cookies: {cookie_names}")
+
             for cookie in all_cookies:
                 if cookie.name == "session":
                     session_cookie = cookie.value
                     logger.info(f"[{self.account_name}] 获取到 session: {session_cookie[:30]}...")
                 elif cookie.name == self.provider.api_user_key:
                     api_user = cookie.value
-                    logger.info(f"[{self.account_name}] 获取到 api_user: {api_user}")
+                    logger.info(f"[{self.account_name}] 获取到 api_user (cookie): {api_user}")
 
+            # 如果没有从 cookie 获取到 api_user，尝试从 localStorage 获取
             if not api_user:
-                api_user = await tab.evaluate(f'''
-                    localStorage.getItem("{self.provider.api_user_key}") ||
-                    localStorage.getItem("user_id")
-                ''')
+                # NewAPI 将用户信息存储在 localStorage 的 'user' 键中
+                api_user = await tab.evaluate("""
+                    (function() {
+                        // 尝试从 localStorage 的 user 对象获取 id
+                        try {
+                            const userStr = localStorage.getItem('user');
+                            if (userStr) {
+                                const user = JSON.parse(userStr);
+                                if (user && user.id) {
+                                    return String(user.id);
+                                }
+                            }
+                        } catch (e) {}
+
+                        // 尝试其他可能的键名
+                        const keys = ['user_id', 'userId', 'new-api-user', 'api_user'];
+                        for (const key of keys) {
+                            const val = localStorage.getItem(key);
+                            if (val) return val;
+                        }
+
+                        return null;
+                    })()
+                """)
                 if api_user:
                     logger.info(f"[{self.account_name}] 从 localStorage 获取到 api_user: {api_user}")
+
+            # 如果还是没有，尝试调用 API 获取用户信息
+            if not api_user and session_cookie:
+                logger.info(f"[{self.account_name}] 尝试通过 API 获取用户信息...")
+                try:
+                    user_info = await tab.evaluate(f"""
+                        (async function() {{
+                            try {{
+                                const resp = await fetch('{self.provider.domain}/api/user/self', {{
+                                    credentials: 'include'
+                                }});
+                                const data = await resp.json();
+                                if (data.success && data.data && data.data.id) {{
+                                    return String(data.data.id);
+                                }}
+                            }} catch (e) {{}}
+                            return null;
+                        }})()
+                    """)
+                    if user_info:
+                        api_user = user_info
+                        logger.info(f"[{self.account_name}] 从 API 获取到 api_user: {api_user}")
+                except Exception as e:
+                    logger.debug(f"[{self.account_name}] API 获取用户信息失败: {e}")
 
         except Exception as e:
             logger.error(f"[{self.account_name}] 提取 session 失败: {e}")
