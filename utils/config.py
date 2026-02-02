@@ -224,12 +224,7 @@ NEWAPI_SITES = {
         "cookie_domain": "ai.zzhdsgsss.xyz",
         "currency": "$",
     },
-    "zeroliya": {
-        "name": "小呆公益站",
-        "domain": "https://new.184772.xyz",
-        "cookie_domain": "new.184772.xyz",
-        "currency": "$",
-    },
+
     "mitchll": {
         "name": "Mitchll-api公益站",
         "domain": "https://api.mitchll.com",
@@ -409,7 +404,7 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
         "sign_in_path": "/api/user/checkin",
     },
     "elysiver": {
-        "domain": "https://h-e.top",
+        "domain": "https://elysiver.h-e.top",
         "sign_in_path": "/api/user/checkin",
     },
     "kfcapi": {
@@ -428,10 +423,7 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
         "domain": "https://ai.zzhdsgsss.xyz",
         "sign_in_path": "/api/user/checkin",
     },
-    "zeroliya": {
-        "domain": "https://new.184772.xyz",
-        "sign_in_path": "/api/user/checkin",
-    },
+
     "mitchll": {
         "domain": "https://api.mitchll.com",
         "sign_in_path": "/api/user/checkin",

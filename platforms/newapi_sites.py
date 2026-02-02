@@ -8,14 +8,6 @@ NewAPI 站点适配器集合
 from platforms.newapi_base import NewAPIAdapter
 
 
-class ZeroLiyaAdapter(NewAPIAdapter):
-    """小呆公益站签到适配器"""
-    PLATFORM_NAME = "小呆公益站"
-    BASE_URL = "https://new.184772.xyz"
-    COOKIE_DOMAIN = "new.184772.xyz"
-    CURRENCY_UNIT = "$"
-
-
 class MitchllAdapter(NewAPIAdapter):
     """Mitchll-api公益站签到适配器"""
     PLATFORM_NAME = "Mitchll-api公益站"

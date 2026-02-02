@@ -85,12 +85,12 @@ except ImportError:
 # 公益站配置 - 与 utils/config.py 中的 NEWAPI_SITES 保持一致
 SITES_CONFIG = {
     "wong": {"domain": "wzw.pp.ua", "name": "WONG公益站"},
-    "elysiver": {"domain": "h-e.top", "name": "Elysiver"},
+    "elysiver": {"domain": "elysiver.h-e.top", "name": "Elysiver"},
     "kfcapi": {"domain": "kfc-api.sxxe.net", "name": "KFC API"},
     "duckcoding": {"domain": "free.duckcoding.com", "name": "Free DuckCoding"},
     "runanytime": {"domain": "runanytime.hxi.me", "name": "随时跑路"},
     "neb": {"domain": "ai.zzhdsgsss.xyz", "name": "NEB公益站"},
-    "zeroliya": {"domain": "new.184772.xyz", "name": "小呆公益站"},
+
     "mitchll": {"domain": "api.mitchll.com", "name": "Mitchll-api"},
     "anyrouter": {"domain": "anyrouter.top", "name": "AnyRouter"},
     "linuxdo": {"domain": "linux.do", "name": "LinuxDO"},

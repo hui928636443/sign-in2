@@ -1,18 +1,10 @@
-name: Multi-Platform Daily Check-in
+name: NewAPI Daily Check-in
 
 on:
   schedule:
     - cron: '0 0,12 * * *'  # 每天 2 次（UTC 0点和12点，即北京时间 8点和20点）
 
   workflow_dispatch:
-    inputs:
-      platform:
-        description: '指定平台 (留空运行所有)'
-        required: false
-        type: choice
-        options:
-          - ''
-          - newapi
 
 jobs:
   checkin:

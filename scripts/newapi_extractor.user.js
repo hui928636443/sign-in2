@@ -10,7 +10,6 @@
 // @match        *://free.duckcoding.com/*
 // @match        *://runanytime.hxi.me/*
 // @match        *://ai.zzhdsgsss.xyz/*
-// @match        *://new.184772.xyz/*
 // @match        *://api.mitchll.com/*
 // @match        *://anyrouter.top/*
 // @match        *://gyapi.zxiaoruan.cn/*
@@ -36,7 +35,6 @@
         'free.duckcoding.com': 'duckcoding',
         'runanytime.hxi.me': 'runanytime',
         'ai.zzhdsgsss.xyz': 'neb',
-        'new.184772.xyz': 'zeroliya',
         'api.mitchll.com': 'mitchll',
         'anyrouter.top': 'anyrouter',
         'gyapi.zxiaoruan.cn': 'zhongruan',

@@ -76,12 +76,12 @@ except ImportError:
 # 站点配置
 SITES_CONFIG = {
     "wong": {"domain": "wzw.pp.ua", "name": "WONG公益站", "provider": "wong"},
-    "elysiver": {"domain": "h-e.top", "name": "Elysiver", "provider": "elysiver"},
+    "elysiver": {"domain": "elysiver.h-e.top", "name": "Elysiver", "provider": "elysiver"},
     "kfcapi": {"domain": "kfc-api.sxxe.net", "name": "KFC API", "provider": "kfcapi"},
     "duckcoding": {"domain": "free.duckcoding.com", "name": "Free DuckCoding", "provider": "duckcoding"},
     "runanytime": {"domain": "runanytime.hxi.me", "name": "随时跑路", "provider": "runanytime"},
     "neb": {"domain": "ai.zzhdsgsss.xyz", "name": "NEB公益站", "provider": "neb"},
-    "zeroliya": {"domain": "new.184772.xyz", "name": "小呆公益站", "provider": "zeroliya"},
+
     "mitchll": {"domain": "api.mitchll.com", "name": "Mitchll-api", "provider": "mitchll"},
     "anyrouter": {"domain": "anyrouter.top", "name": "AnyRouter", "provider": "anyrouter"},
 }

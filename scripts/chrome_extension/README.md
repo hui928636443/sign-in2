@@ -33,12 +33,11 @@
 ## 支持的站点
 
 - WONG公益站 (wzw.pp.ua)
-- Elysiver (h-e.top)
+- Elysiver (elysiver.h-e.top)
 - KFC API (kfc-api.sxxe.net)
 - Free DuckCoding (free.duckcoding.com)
 - 随时跑路 (runanytime.hxi.me)
 - NEB公益站 (ai.zzhdsgsss.xyz)
-- 小呆公益站 (new.184772.xyz)
 - Mitchll-api (api.mitchll.com)
 - AnyRouter (anyrouter.top)
 

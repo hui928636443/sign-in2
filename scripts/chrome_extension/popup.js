@@ -1,12 +1,11 @@
 // NewAPI 站点配置 - 默认站点
 const DEFAULT_SITES = {
   wong: { domain: "wzw.pp.ua", name: "WONG公益站", provider: "wong", url: "https://wzw.pp.ua" },
-  elysiver: { domain: "h-e.top", name: "Elysiver", provider: "elysiver", url: "https://h-e.top" },
+  elysiver: { domain: "elysiver.h-e.top", name: "Elysiver", provider: "elysiver", url: "https://elysiver.h-e.top" },
   kfcapi: { domain: "kfc-api.sxxe.net", name: "KFC API", provider: "kfcapi", url: "https://kfc-api.sxxe.net" },
   duckcoding: { domain: "free.duckcoding.com", name: "Free DuckCoding", provider: "duckcoding", url: "https://free.duckcoding.com" },
   runanytime: { domain: "runanytime.hxi.me", name: "随时跑路", provider: "runanytime", url: "https://runanytime.hxi.me" },
   neb: { domain: "ai.zzhdsgsss.xyz", name: "NEB公益站", provider: "neb", url: "https://ai.zzhdsgsss.xyz" },
-  zeroliya: { domain: "new.184772.xyz", name: "小呆公益站", provider: "zeroliya", url: "https://new.184772.xyz" },
   mitchll: { domain: "api.mitchll.com", name: "Mitchll-api", provider: "mitchll", url: "https://api.mitchll.com" },
   anyrouter: { domain: "anyrouter.top", name: "AnyRouter", provider: "anyrouter", url: "https://anyrouter.top" },
 };

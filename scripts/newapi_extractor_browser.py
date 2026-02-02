@@ -65,11 +65,7 @@ NEWAPI_SITES = {
         "url": "https://ai.zzhdsgsss.xyz",
         "linuxdo_user": "simon_z",
     },
-    "zeroliya": {
-        "name": "小呆公益站",
-        "url": "https://new.184772.xyz",
-        "linuxdo_user": "zeroliya",
-    },
+
     "mitchll": {
         "name": "Mitchll-api",
         "url": "https://api.mitchll.com",
