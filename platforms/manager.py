@@ -312,59 +312,76 @@ class PlatformManager:
         required_cookies = provider.waf_cookie_names or []
         login_url = f"{provider.domain}{provider.login_path}"
 
+        # 创建临时目录，不使用 with 语句以避免 Windows 文件锁定问题
+        temp_dir = tempfile.mkdtemp()
+        waf_cookies = {}
+
         try:
             async with async_playwright() as p:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    # 参考 anyrouter-check-in 的配置：headless=False 更不容易被检测
-                    context = await p.chromium.launch_persistent_context(
-                        user_data_dir=temp_dir,
-                        headless=False,  # 非 headless 模式更不容易被 WAF 检测
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-                        viewport={"width": 1920, "height": 1080},
-                        args=[
-                            "--disable-blink-features=AutomationControlled",
-                            "--disable-dev-shm-usage",
-                            "--disable-web-security",
-                            "--disable-features=VizDisplayCompositor",
-                            "--no-sandbox",
-                        ],
-                    )
+                # 参考 anyrouter-check-in 的配置：headless=False 更不容易被检测
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=temp_dir,
+                    headless=False,  # 非 headless 模式更不容易被 WAF 检测
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+                    viewport={"width": 1920, "height": 1080},
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage",
+                        "--disable-web-security",
+                        "--disable-features=VizDisplayCompositor",
+                        "--no-sandbox",
+                    ],
+                )
 
-                    page = await context.new_page()
-                    logger.debug(f"[{account_name}] 访问登录页面: {login_url}")
-                    await page.goto(login_url, wait_until="networkidle", timeout=30000)
+                page = await context.new_page()
+                logger.debug(f"[{account_name}] 访问登录页面: {login_url}")
+                
+                # 先访问页面，等待 Cloudflare 验证
+                await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+                
+                # 等待 Cloudflare 验证完成（最多等待 30 秒）
+                for _ in range(30):
+                    title = await page.title()
+                    if "just a moment" not in title.lower() and "请稍候" not in title:
+                        break
+                    await page.wait_for_timeout(1000)
+                
+                # 等待页面完全加载
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
 
-                    # 等待页面加载完成
-                    try:
-                        await page.wait_for_function('document.readyState === "complete"', timeout=5000)
-                    except Exception:
-                        await page.wait_for_timeout(3000)
+                # 获取 cookies
+                cookies = await page.context.cookies()
+                for cookie in cookies:
+                    cookie_name = cookie.get("name")
+                    cookie_value = cookie.get("value")
+                    if cookie_name in required_cookies and cookie_value:
+                        waf_cookies[cookie_name] = cookie_value
 
-                    # 获取 cookies
-                    cookies = await page.context.cookies()
-                    waf_cookies = {}
-                    for cookie in cookies:
-                        cookie_name = cookie.get("name")
-                        cookie_value = cookie.get("value")
-                        if cookie_name in required_cookies and cookie_value:
-                            waf_cookies[cookie_name] = cookie_value
-
-                    await context.close()
-
-                    # 检查是否获取到所有需要的 cookies
-                    missing_cookies = [c for c in required_cookies if c not in waf_cookies]
-                    if missing_cookies:
-                        logger.warning(f"[{account_name}] 缺少 WAF cookies: {missing_cookies}")
-
-                    if waf_cookies:
-                        logger.success(f"[{account_name}] 获取到 {len(waf_cookies)} 个 WAF cookies: {list(waf_cookies.keys())}")
-                        return waf_cookies
-                    else:
-                        logger.warning(f"[{account_name}] 未获取到任何 WAF cookies")
-                        return None
+                await context.close()
 
         except Exception as e:
             logger.error(f"[{account_name}] 获取 WAF cookies 失败: {e}")
+        finally:
+            # 尝试清理临时目录，忽略 Windows 文件锁定错误
+            try:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+        # 检查是否获取到所有需要的 cookies
+        missing_cookies = [c for c in required_cookies if c not in waf_cookies]
+        if missing_cookies:
+            logger.warning(f"[{account_name}] 缺少 WAF cookies: {missing_cookies}")
+
+        if waf_cookies:
+            logger.success(f"[{account_name}] 获取到 {len(waf_cookies)} 个 WAF cookies: {list(waf_cookies.keys())}")
+            return waf_cookies
+        else:
+            logger.warning(f"[{account_name}] 未获取到任何 WAF cookies")
             return None
 
     def send_summary_notification(self, force: bool = False) -> None:

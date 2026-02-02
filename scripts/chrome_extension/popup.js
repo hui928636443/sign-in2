@@ -604,6 +604,137 @@ async function init() {
   if (configs.length > 0) {
     setStatus(`📂 已保存 ${configs.length} 个账号，点击提取更新或追加`, "info");
   }
+  
+  // 绑定 LinuxDO 提取按钮
+  document.getElementById("extractLinuxdoBtn").addEventListener("click", extractLinuxdoCookies);
+  document.getElementById("copyLinuxdoBtn").addEventListener("click", copyLinuxdoConfig);
+}
+
+// LinuxDO Cookie 提取
+let linuxdoConfig = null;
+
+async function extractLinuxdoCookies() {
+  const btn = document.getElementById("extractLinuxdoBtn");
+  btn.disabled = true;
+  btn.textContent = "⏳ 提取中...";
+  setStatus("正在提取 LinuxDO Cookie...", "info");
+  
+  try {
+    // 获取 LinuxDO 的所有 Cookie
+    const cookies = await new Promise((resolve) => {
+      chrome.cookies.getAll({ domain: "linux.do" }, resolve);
+    });
+    
+    // 提取关键 Cookie
+    const cookieMap = {};
+    const importantCookies = ["_forum_session", "_t", "cf_clearance"];
+    
+    for (const cookie of cookies) {
+      if (importantCookies.includes(cookie.name)) {
+        cookieMap[cookie.name] = cookie.value;
+      }
+    }
+    
+    // 检查是否有必要的 Cookie
+    if (!cookieMap._forum_session && !cookieMap._t) {
+      setStatus("❌ 未找到 LinuxDO Cookie，请先登录 linux.do", "error");
+      btn.disabled = false;
+      btn.textContent = "🐧 提取 LinuxDO Cookie";
+      return;
+    }
+    
+    // 尝试获取用户名（从打开的标签页）
+    let username = null;
+    const tabs = await chrome.tabs.query({ url: "*://linux.do/*" });
+    
+    if (tabs.length > 0) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tabs[0].id },
+          func: () => {
+            // 尝试多种方式获取用户名
+            // 1. 从 Discourse 的 User 对象
+            if (window.Discourse && window.Discourse.User && window.Discourse.User.current()) {
+              return window.Discourse.User.current().username;
+            }
+            // 2. 从页面元素
+            const userLink = document.querySelector(".current-user a[data-user-card]");
+            if (userLink) {
+              return userLink.dataset.userCard;
+            }
+            // 3. 从头像链接
+            const avatar = document.querySelector(".header-dropdown-toggle.current-user img");
+            if (avatar && avatar.alt) {
+              return avatar.alt;
+            }
+            return null;
+          },
+        });
+        username = results[0]?.result;
+      } catch (e) {
+        console.log("获取用户名失败:", e);
+      }
+    }
+    
+    // 构建 Cookie 字符串
+    const cookieStr = Object.entries(cookieMap)
+      .map(([k, v]) => `${k}=${v}`)
+      .join("; ");
+    
+    // 生成配置
+    linuxdoConfig = [{
+      name: username || "LinuxDO账号",
+      cookies: cookieStr,
+      level: 2,
+      browse_enabled: true
+    }];
+    
+    // 显示结果
+    const outputEl = document.getElementById("linuxdoOutput");
+    const resultEl = document.getElementById("linuxdoResult");
+    
+    outputEl.textContent = JSON.stringify(linuxdoConfig, null, 2);
+    resultEl.style.display = "block";
+    
+    // 保存到 storage
+    await new Promise((resolve) => {
+      chrome.storage.local.set({ linuxdo_config: linuxdoConfig }, resolve);
+    });
+    
+    const cookieCount = Object.keys(cookieMap).length;
+    setStatus(`✅ 成功提取 LinuxDO Cookie (${cookieCount} 个)${username ? `，用户: ${username}` : ""}`, "success");
+    
+  } catch (e) {
+    console.error("提取 LinuxDO Cookie 失败:", e);
+    setStatus("❌ 提取失败: " + e.message, "error");
+  }
+  
+  btn.disabled = false;
+  btn.textContent = "🐧 提取 LinuxDO Cookie";
+}
+
+async function copyLinuxdoConfig() {
+  if (!linuxdoConfig) {
+    // 尝试从 storage 加载
+    const result = await new Promise((resolve) => {
+      chrome.storage.local.get(["linuxdo_config"], resolve);
+    });
+    linuxdoConfig = result.linuxdo_config;
+  }
+  
+  if (!linuxdoConfig) {
+    setStatus("⚠️ 请先提取 LinuxDO Cookie", "error");
+    return;
+  }
+  
+  const jsonStr = JSON.stringify(linuxdoConfig, null, 2);
+  await navigator.clipboard.writeText(jsonStr);
+  
+  const btn = document.getElementById("copyLinuxdoBtn");
+  btn.textContent = "✅ 已复制!";
+  setTimeout(() => {
+    btn.textContent = "📋 复制 LinuxDO 配置";
+  }, 2000);
 }
 
 init();

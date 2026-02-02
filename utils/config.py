@@ -277,8 +277,10 @@ class LinuxDOAccount:
     一个 LinuxDO 账号可以签到多个支持 LinuxDO OAuth 的站点。
 
     支持的字段：
-    - username: 用户名（必填）
-    - password: 密码（必填）
+    - username: 用户名（必填，除非使用纯 Cookie 模式）
+    - password: 密码（必填，除非使用纯 Cookie 模式）
+    - cookies: Cookie 字典或字符串（可选，优先使用）
+        - 支持格式：{"_forum_session": "xxx", "_t": "xxx"} 或 "_forum_session=xxx; _t=xxx"
     - name: 账号显示名称（可选）
     - browse_enabled / browse_linuxdo: 是否浏览帖子（可选，默认 True）
     - browse_count: 浏览帖子数量（可选，默认根据 level 计算）
@@ -289,8 +291,9 @@ class LinuxDOAccount:
     - sites: 要签到的站点列表（可选，默认空，仅浏览主站）
     """
 
-    username: str
-    password: str
+    username: str | None = None
+    password: str | None = None
+    cookies: dict | str | None = None  # Cookie 优先登录
     sites: list[str] = field(default_factory=list)  # 默认不签到任何站点，仅浏览主站
     browse_linuxdo: bool = True  # 是否浏览 LinuxDO 帖子
     browse_count: int = 7  # 浏览帖子数量
@@ -315,9 +318,13 @@ class LinuxDOAccount:
         level_browse_count = {1: 10, 2: 7, 3: 5}
         browse_count = data.get("browse_count", level_browse_count.get(level, 7))
 
+        # 获取 cookies（支持字典或字符串格式）
+        cookies = data.get("cookies")
+
         return cls(
-            username=data["username"],
-            password=data["password"],
+            username=data.get("username"),
+            password=data.get("password"),
+            cookies=cookies,
             sites=sites,
             browse_linuxdo=browse_linuxdo,
             browse_count=browse_count,
@@ -329,6 +336,33 @@ class LinuxDOAccount:
         if self.name:
             return self.name
         return self.username or f"LinuxDO Account {index + 1}"
+
+    def has_cookies(self) -> bool:
+        """检查是否有可用的 Cookie"""
+        return bool(self.cookies)
+
+    def has_credentials(self) -> bool:
+        """检查是否有用户名密码"""
+        return bool(self.username and self.password)
+
+    def get_cookies_dict(self) -> dict:
+        """获取 Cookie 字典格式"""
+        if not self.cookies:
+            return {}
+
+        if isinstance(self.cookies, dict):
+            return self.cookies
+
+        # 解析字符串格式的 Cookie
+        # 格式: "_forum_session=xxx; _t=xxx; cf_clearance=xxx"
+        cookies_dict = {}
+        if isinstance(self.cookies, str):
+            for item in self.cookies.split(";"):
+                item = item.strip()
+                if "=" in item:
+                    key, value = item.split("=", 1)
+                    cookies_dict[key.strip()] = value.strip()
+        return cookies_dict
 
 
 @dataclass
@@ -649,8 +683,15 @@ class AppConfig:
                             logger.error(f"LinuxDO 账号 {i + 1} 配置格式错误: 必须是 JSON 对象")
                             continue
 
-                        if "username" not in account_dict or "password" not in account_dict:
-                            logger.error(f"LinuxDO 账号 {i + 1} 缺少必填字段: 需要 'username' 和 'password'")
+                        # 支持两种模式：Cookie 模式或账号密码模式
+                        has_cookies = "cookies" in account_dict and account_dict["cookies"]
+                        has_credentials = "username" in account_dict and "password" in account_dict
+
+                        if not has_cookies and not has_credentials:
+                            logger.error(
+                                f"LinuxDO 账号 {i + 1} 缺少必填字段: "
+                                f"需要 'cookies' 或 ('username' 和 'password')"
+                            )
                             continue
 
                         accounts.append(LinuxDOAccount.from_dict(account_dict, i))
@@ -686,11 +727,11 @@ class AppConfig:
     @classmethod
     def _load_anyrouter_accounts(cls) -> list[AnyRouterAccount]:
         """从环境变量加载 NewAPI 站点账号配置
-        
+
         支持两个环境变量（优先级从高到低）：
         1. NEWAPI_ACCOUNTS - 新的统一配置名
         2. ANYROUTER_ACCOUNTS - 兼容旧配置
-        
+
         JSON 格式示例:
         [
             {
@@ -722,7 +763,7 @@ class AppConfig:
                 if "cookies" not in account_dict or "api_user" not in account_dict:
                     logger.error(f"账号 {i + 1} 缺少必填字段: 需要 'cookies' 和 'api_user'")
                     continue
-                
+
                 # 验证 provider 是否在预设列表中
                 provider = account_dict.get("provider", "anyrouter")
                 if provider not in DEFAULT_PROVIDERS:
@@ -735,7 +776,7 @@ class AppConfig:
                 provider_counts = {}
                 for acc in accounts:
                     provider_counts[acc.provider] = provider_counts.get(acc.provider, 0) + 1
-                
+
                 count_str = ", ".join(f"{p}: {c}" for p, c in sorted(provider_counts.items()))
                 logger.info(f"成功加载 {len(accounts)} 个 NewAPI 账号配置 ({count_str})")
             return accounts
@@ -750,7 +791,7 @@ class AppConfig:
     @classmethod
     def _load_providers(cls) -> dict[str, ProviderConfig]:
         """加载 Provider 配置
-        
+
         默认加载所有预设的站点配置，用户可以通过 PROVIDERS 环境变量覆盖或添加新站点。
         """
         # 从预设配置创建 ProviderConfig 对象

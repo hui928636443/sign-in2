@@ -645,13 +645,20 @@ class BrowserManager:
             f"DISPLAY={display_set}, CI={is_ci}, root={is_root})"
         )
 
-        # Requirement 8.3: CI 环境稳定性参数
+        # Requirement 8.3: CI 环境稳定性参数 + 反检测参数
         browser_args = [
             "--disable-dev-shm-usage",  # 避免 /dev/shm 空间不足问题
             "--disable-gpu",             # CI 环境通常没有 GPU
             "--no-first-run",            # 跳过首次运行向导
             "--no-service-autorun",      # 禁用后台服务自动运行
             "--password-store=basic",    # 使用基本密码存储
+            # 反检测参数（2025 最佳实践）
+            "--disable-blink-features=AutomationControlled",  # 隐藏自动化特征
+            "--disable-features=IsolateOrigins,site-per-process",  # 禁用站点隔离
+            "--disable-infobars",        # 禁用信息栏
+            "--disable-popup-blocking",  # 禁用弹窗拦截
+            "--window-size=1920,1080",   # 设置窗口大小（模拟真实用户）
+            "--start-maximized",         # 最大化窗口
         ]
 
         # CI 环境额外参数
@@ -664,16 +671,27 @@ class BrowserManager:
                 "--metrics-recording-only",         # 仅记录指标
                 "--mute-audio",                     # 静音
                 "--no-default-browser-check",       # 跳过默认浏览器检查
+                # CI 环境额外反检测参数
+                "--disable-web-security",           # 禁用 Web 安全（允许跨域）
+                "--ignore-certificate-errors",      # 忽略证书错误
             ])
-            logger.debug("CI 环境检测到，添加额外稳定性参数")
+            logger.debug("CI 环境检测到，添加额外稳定性和反检测参数")
 
-        # Requirement 8.1: 在 CI 环境中使用 headless 模式更稳定
-        # 虽然 headless 模式容易被反爬虫检测，但在 CI 环境中连接稳定性更重要
-        # 新版 Chrome 的 --headless=new 模式已经大大改善了检测问题
+        # Requirement 8.1: headless 模式策略
+        # 在 CI 环境中，如果有 Xvfb（DISPLAY 已设置），优先使用非 headless 模式
+        # 非 headless 模式更难被 Cloudflare 检测
         if is_ci:
-            # CI 环境强制使用 headless 模式，避免 Xvfb 连接问题
-            use_headless = True
-            logger.info("CI 环境检测到，强制使用 headless 模式以确保连接稳定性")
+            if display_set:
+                # 有 Xvfb 虚拟显示，使用非 headless 模式（更难被检测）
+                use_headless = False
+                logger.info(
+                    f"CI 环境检测到 DISPLAY={os.environ.get('DISPLAY')}，"
+                    f"使用非 headless 模式（Xvfb 虚拟显示，更难被 Cloudflare 检测）"
+                )
+            else:
+                # 没有 Xvfb，回退到 headless 模式
+                use_headless = True
+                logger.info("CI 环境未检测到 DISPLAY，使用 headless 模式")
         else:
             # 本地环境：当 DISPLAY 设置时使用非 headless 模式
             use_headless = self.headless and not display_set

@@ -1,13 +1,20 @@
-name: LinuxDO Daily Browse
+name: LinuxDO Browse & Check-in
 
 on:
   schedule:
-    # 每天 3 次（UTC 21点、0点、14点，即北京时间 5点、8点、22点）
-    - cron: '0 21 * * *'   # 北京时间 5:00
-    - cron: '0 0 * * *'    # 北京时间 8:00
-    - cron: '0 14 * * *'   # 北京时间 22:00
+    # 每天 4 次：北京时间 6点、12点、18点、24点
+    - cron: '0 22,4,10,16 * * *'
 
   workflow_dispatch:
+    inputs:
+      debug_mode:
+        description: '启用调试模式（显示更多日志）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   browse:
@@ -15,49 +22,151 @@ jobs:
     permissions:
       actions: write
       contents: read
+    
     steps:
       - uses: actions/checkout@v4
-      
+
       # 安装 uv
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
-      
+
       # 设置 Python
       - name: Set up Python
         run: uv python install 3.12
-      
+
       # 安装依赖
       - name: Install dependencies
         run: uv sync
-      
-      # 安装 Xvfb 虚拟显示
+
+      # 安装 Xvfb 虚拟显示和 Chrome（用于绕过 Cloudflare 的 headless 检测）
       - name: Install Xvfb and Chrome
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb google-chrome-stable
-      
-      # 安装 Patchright 浏览器
+          # 验证 Chrome 安装
+          google-chrome-stable --version
+
+      # 安装 Patchright 浏览器（备用）
       - name: Install Patchright browsers
         run: uv run patchright install chromium
-      
-      # 执行 LinuxDO 浏览
-      - name: Execute LinuxDO browse
+
+      # 执行 LinuxDO 浏览签到
+      - name: Browse LinuxDO
         env:
+          # 浏览器引擎配置
+          # nodriver: 不基于 WebDriver，直接使用 CDP，最难被检测（推荐）
+          BROWSER_ENGINE: nodriver
           DISPLAY: ":99"
+          
+          # LinuxDO 账号配置
+          # JSON 格式: [{"username": "xxx", "password": "xxx", "level": 2}]
+          # 或 Cookie 模式: [{"name": "账号名", "cookies": "_forum_session=xxx; _t=xxx"}]
           LINUXDO_ACCOUNTS: ${{ secrets.LINUXDO_ACCOUNTS }}
           
-          # 通知配置
+          # 通知配置 - Email
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          CUSTOM_SMTP_SERVER: ${{ secrets.CUSTOM_SMTP_SERVER }}
+          
+          # 通知配置 - Gotify
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          
+          # 通知配置 - PushPlus
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          SC3_PUSH_KEY: ${{ secrets.SC3_PUSH_KEY }}
+          
+          # 通知配置 - Telegram
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          
+          # 调试模式
+          DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
         run: |
-          xvfb-run --server-args="-screen 0 1920x1080x24" uv run python main.py --platform linuxdo
+          # 启动 Xvfb 虚拟显示（模拟真实显示器，绕过 Cloudflare headless 检测）
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          
+          # 验证 DISPLAY 设置
+          echo "DISPLAY=$DISPLAY"
+          
+          # 执行 LinuxDO 浏览
+          uv run python -c "
+import asyncio
+import os
+import sys
+from loguru import logger
+
+# 配置日志
+if os.environ.get('DEBUG_MODE') == 'true':
+    logger.remove()
+    logger.add(sys.stdout, level='DEBUG')
+else:
+    logger.remove()
+    logger.add(sys.stdout, level='INFO')
+
+from utils.config import AppConfig
+from platforms.linuxdo import LinuxDOAdapter
+from utils.notify import send_notification
+
+async def main():
+    config = AppConfig.load_from_env()
+    
+    if not config.linuxdo_accounts:
+        logger.error('未配置 LINUXDO_ACCOUNTS 环境变量')
+        sys.exit(1)
+    
+    results = []
+    
+    for i, account in enumerate(config.linuxdo_accounts):
+        if not account.browse_linuxdo:
+            logger.info(f'账号 {account.get_display_name(i)} 已禁用浏览')
+            continue
+        
+        logger.info(f'开始处理账号: {account.get_display_name(i)}')
+        
+        adapter = LinuxDOAdapter(
+            username=account.username,
+            password=account.password,
+            cookies=account.cookies,
+            browse_count=account.browse_count,
+            account_name=account.get_display_name(i),
+            level=account.level,
+        )
+        
+        try:
+            # 登录
+            login_success = await adapter.login()
+            if not login_success:
+                logger.error(f'账号 {account.get_display_name(i)} 登录失败')
+                results.append(f'❌ {account.get_display_name(i)}: 登录失败')
+                continue
+            
+            logger.success(f'账号 {account.get_display_name(i)} 登录成功 (方式: {adapter._login_method})')
+            
+            # 浏览帖子
+            result = await adapter.checkin()
+            results.append(f'✅ {account.get_display_name(i)}: {result.message}')
+            logger.success(f'账号 {account.get_display_name(i)} 完成: {result.message}')
+            
+        except Exception as e:
+            logger.error(f'账号 {account.get_display_name(i)} 出错: {e}')
+            results.append(f'❌ {account.get_display_name(i)}: {str(e)[:50]}')
+        finally:
+            await adapter.cleanup()
+    
+    # 发送通知
+    if results:
+        title = 'LinuxDO 浏览签到结果'
+        content = '\n'.join(results)
+        logger.info(f'发送通知:\n{content}')
+        await send_notification(title, content)
+
+asyncio.run(main())
+"
 
       # 清理旧的工作流运行记录
       - name: Delete workflow runs
@@ -65,5 +174,5 @@ jobs:
         with:
           token: ${{ github.token }}
           repository: ${{ github.repository }}
-          retain_days: 10
-          keep_minimum_runs: 6
+          retain_days: 7
+          keep_minimum_runs: 5

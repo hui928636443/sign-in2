@@ -18,6 +18,8 @@ import asyncio
 import contextlib
 import json
 import random
+import time
+from pathlib import Path
 
 import httpx
 import nodriver
@@ -35,31 +37,37 @@ class LinuxDOAdapter(BasePlatformAdapter):
     TOP_URL = "https://linux.do/top.json"
     TIMINGS_URL = "https://linux.do/topics/timings"
 
+    # Cookie 持久化文件路径
+    COOKIE_CACHE_DIR = ".linuxdo_cookies"
+
     def __init__(
         self,
-        username: str,
-        password: str,
+        username: str | None = None,
+        password: str | None = None,
         browse_count: int = 10,
         account_name: str | None = None,
         level: int = 2,
+        cookies: dict | str | None = None,
     ):
         """初始化 LinuxDO 适配器
 
         Args:
-            username: LinuxDO 用户名
-            password: LinuxDO 密码
+            username: LinuxDO 用户名（Cookie 模式可选）
+            password: LinuxDO 密码（Cookie 模式可选）
             browse_count: 浏览帖子数量（默认 10）
             account_name: 账号显示名称
             level: 账号等级 1-3，影响浏览时间
                    L1: 多看一些时间（慢速浏览）
                    L2: 一般时间（正常浏览）
                    L3: 快速浏览
+            cookies: 预设的 Cookie（优先使用，跳过浏览器登录）
         """
         self.username = username
         self.password = password
         self.browse_count = browse_count
-        self._account_name = account_name or username
+        self._account_name = account_name or username or "LinuxDO"
         self.level = max(1, min(3, level))  # 限制在 1-3 范围
+        self._preset_cookies = self._parse_cookies(cookies)
 
         self._browser_manager: BrowserManager | None = None
         self.client: httpx.Client | None = None
@@ -68,6 +76,78 @@ class LinuxDOAdapter(BasePlatformAdapter):
         self._browsed_count: int = 0
         self._total_time: int = 0
         self._likes_given: int = 0  # 记录点赞数
+        self._login_method: str = "unknown"  # 记录登录方式
+
+    def _parse_cookies(self, cookies: dict | str | None) -> dict:
+        """解析 Cookie 为字典格式"""
+        if not cookies:
+            return {}
+
+        if isinstance(cookies, dict):
+            return cookies
+
+        # 解析字符串格式: "_forum_session=xxx; _t=xxx"
+        result = {}
+        if isinstance(cookies, str):
+            for item in cookies.split(";"):
+                item = item.strip()
+                if "=" in item:
+                    key, value = item.split("=", 1)
+                    result[key.strip()] = value.strip()
+        return result
+
+    def _get_cookie_cache_path(self) -> Path:
+        """获取 Cookie 缓存文件路径"""
+        cache_dir = Path(self.COOKIE_CACHE_DIR)
+        cache_dir.mkdir(exist_ok=True)
+
+        # 使用用户名或账号名作为文件名
+        safe_name = (self.username or self._account_name or "default").replace("/", "_").replace("\\", "_")
+        return cache_dir / f"{safe_name}.json"
+
+    def _load_cached_cookies(self) -> dict:
+        """从缓存加载 Cookie"""
+        cache_path = self._get_cookie_cache_path()
+        if not cache_path.exists():
+            return {}
+
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                data = json.load(f)
+
+            # 检查是否过期（默认 7 天）
+            saved_time = data.get("saved_at", 0)
+            max_age = 7 * 24 * 3600  # 7 天
+            if time.time() - saved_time > max_age:
+                logger.info(f"[{self.account_name}] 缓存的 Cookie 已过期，将重新登录")
+                return {}
+
+            cookies = data.get("cookies", {})
+            if cookies:
+                logger.info(f"[{self.account_name}] 从缓存加载了 {len(cookies)} 个 Cookie")
+            return cookies
+
+        except Exception as e:
+            logger.warning(f"[{self.account_name}] 加载缓存 Cookie 失败: {e}")
+            return {}
+
+    def _save_cookies_to_cache(self) -> None:
+        """保存 Cookie 到缓存"""
+        if not self._cookies:
+            return
+
+        cache_path = self._get_cookie_cache_path()
+        try:
+            data = {
+                "cookies": self._cookies,
+                "saved_at": time.time(),
+                "username": self.username,
+            }
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"[{self.account_name}] Cookie 已保存到缓存")
+        except Exception as e:
+            logger.warning(f"[{self.account_name}] 保存 Cookie 缓存失败: {e}")
 
     @property
     def platform_name(self) -> str:
@@ -78,6 +158,79 @@ class LinuxDOAdapter(BasePlatformAdapter):
         return self._account_name
 
     async def login(self) -> bool:
+        """登录 LinuxDO
+
+        登录优先级：
+        1. 预设的 Cookie（配置文件中提供）
+        2. 缓存的 Cookie（上次登录保存）
+        3. 浏览器登录（用户名密码）
+        """
+        # 优先级 1: 使用预设的 Cookie
+        if self._preset_cookies:
+            logger.info(f"[{self.account_name}] 尝试使用预设 Cookie 登录...")
+            if await self._login_with_cookies(self._preset_cookies):
+                self._login_method = "preset_cookie"
+                return True
+            logger.warning(f"[{self.account_name}] 预设 Cookie 无效，尝试其他方式")
+
+        # 优先级 2: 使用缓存的 Cookie
+        cached_cookies = self._load_cached_cookies()
+        if cached_cookies:
+            logger.info(f"[{self.account_name}] 尝试使用缓存 Cookie 登录...")
+            if await self._login_with_cookies(cached_cookies):
+                self._login_method = "cached_cookie"
+                return True
+            logger.warning(f"[{self.account_name}] 缓存 Cookie 无效，尝试浏览器登录")
+
+        # 优先级 3: 浏览器登录（需要用户名密码）
+        if not self.username or not self.password:
+            logger.error(f"[{self.account_name}] Cookie 无效且未提供用户名密码，无法登录")
+            return False
+
+        logger.info(f"[{self.account_name}] 使用浏览器登录...")
+        success = await self._login_via_browser()
+
+        if success:
+            self._login_method = "browser"
+            # 保存 Cookie 到缓存
+            self._save_cookies_to_cache()
+
+        return success
+
+    async def _login_with_cookies(self, cookies: dict) -> bool:
+        """使用 Cookie 直接登录（跳过浏览器）
+
+        Args:
+            cookies: Cookie 字典
+
+        Returns:
+            是否登录成功
+        """
+        self._cookies = cookies.copy()
+        self._csrf_token = cookies.get("_forum_session")
+        self._init_http_client()
+
+        # 验证 Cookie 是否有效
+        try:
+            headers = self._build_headers()
+            response = self.client.get(f"{self.BASE_URL}/session/current.json", headers=headers)
+
+            if response.status_code == 200:
+                data = response.json()
+                current_user = data.get("current_user")
+                if current_user:
+                    username = current_user.get("username", "Unknown")
+                    logger.success(f"[{self.account_name}] Cookie 登录成功！用户: {username}")
+                    return True
+
+            logger.debug(f"[{self.account_name}] Cookie 验证失败: {response.status_code}")
+            return False
+
+        except Exception as e:
+            logger.debug(f"[{self.account_name}] Cookie 验证出错: {e}")
+            return False
+
+    async def _login_via_browser(self) -> bool:
         """通过浏览器登录 LinuxDO"""
         import os
         engine = get_browser_engine()
@@ -181,7 +334,7 @@ class LinuxDOAdapter(BasePlatformAdapter):
         await asyncio.sleep(5)
 
         # 使用 JS 等待输入框出现
-        for attempt in range(10):
+        for _ in range(10):
             try:
                 has_input = await tab.evaluate("""
                     (function() {

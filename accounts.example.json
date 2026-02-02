@@ -4,7 +4,7 @@
     "password": "your_password",
     "browse_enabled": true,
     "name": "主账号",
-    "level": 3
+    "level": 2
   },
   {
     "username": "account2@example.com",
@@ -12,5 +12,11 @@
     "browse_enabled": true,
     "name": "小号1",
     "level": 1
+  },
+  {
+    "name": "Cookie模式账号",
+    "cookies": "_forum_session=xxx; _t=xxx; cf_clearance=xxx",
+    "browse_enabled": true,
+    "level": 3
   }
 ]
