@@ -2,50 +2,53 @@
 """
 NewAPI 站点浏览器自动签到模块
 
-使用 nodriver 浏览器自动化来处理：
-1. Cloudflare 验证
-2. LinuxDO OAuth 登录
-3. 自动签到
+支持两种登录方式（按优先级）：
+1. Cookie 方式（优先）- 使用配置文件中的 session 和 api_user
+2. LinuxDO OAuth 方式（回退）- Cookie 失效时自动使用浏览器登录
 
-适用于 session 过期时间短的站点，每次签到时实时获取新 session。
+适用于 session 过期时间短的站点（如 hotaru, lightllm）。
+
+参考 linuxdo.py 的成功实现：
+- 使用 JS 直接赋值填写表单（而不是 send_keys）
+- 先访问首页通过 Cloudflare，再访问登录页
+- 使用 BrowserManager 管理浏览器
 """
 
 import asyncio
 import json
+import os
 
+import httpx
 import nodriver as uc
 from loguru import logger
 
 from platforms.base import CheckinResult, CheckinStatus
+from utils.browser import BrowserManager, get_browser_engine
 from utils.config import DEFAULT_PROVIDERS, ProviderConfig
 
 
 class NewAPIBrowserCheckin:
-    """NewAPI 站点浏览器自动签到"""
+    """NewAPI 站点浏览器自动签到（支持 Cookie 和 OAuth 两种方式）"""
 
-    # LinuxDO 登录相关
     LINUXDO_URL = "https://linux.do"
     LINUXDO_LOGIN_URL = "https://linux.do/login"
 
     def __init__(
         self,
         provider_name: str,
-        linuxdo_username: str,
-        linuxdo_password: str,
+        linuxdo_username: str | None = None,
+        linuxdo_password: str | None = None,
+        cookies: dict | str | None = None,
+        api_user: str | None = None,
         account_name: str | None = None,
     ):
-        """初始化
-
-        Args:
-            provider_name: 站点名称（如 hotaru, lightllm, techstar）
-            linuxdo_username: LinuxDO 用户名
-            linuxdo_password: LinuxDO 密码
-            account_name: 账号显示名称
-        """
+        """初始化"""
         self.provider_name = provider_name
         self.linuxdo_username = linuxdo_username
         self.linuxdo_password = linuxdo_password
-        self._account_name = account_name or f"{provider_name}_{linuxdo_username}"
+        self._preset_cookies = self._parse_cookies(cookies)
+        self._preset_api_user = api_user
+        self._account_name = account_name or f"{provider_name}_{linuxdo_username or 'unknown'}"
 
         # 获取 provider 配置
         if provider_name in DEFAULT_PROVIDERS:
@@ -53,90 +56,158 @@ class NewAPIBrowserCheckin:
         else:
             raise ValueError(f"未知的 provider: {provider_name}")
 
-        self.browser = None
-        self.tab = None
+        # 运行时状态
+        self._browser_manager: BrowserManager | None = None
+        self._session_cookie: str | None = None
+        self._api_user: str | None = None
+        self._login_method: str = "unknown"
+
+    def _parse_cookies(self, cookies: dict | str | None) -> dict:
+        """解析 Cookie 为字典格式"""
+        if not cookies:
+            return {}
+        if isinstance(cookies, dict):
+            return cookies
+        result = {}
+        if isinstance(cookies, str):
+            for item in cookies.split(";"):
+                item = item.strip()
+                if "=" in item:
+                    key, value = item.split("=", 1)
+                    result[key.strip()] = value.strip()
+        return result
 
     @property
     def account_name(self) -> str:
         return self._account_name
 
-    async def _wait_for_cloudflare(self, timeout: int = 30) -> bool:
-        """等待 Cloudflare 挑战完成"""
-        logger.info(f"[{self.account_name}] 检测 Cloudflare 挑战...")
+    async def _checkin_with_cookies(self, session_cookie: str, api_user: str) -> tuple[bool, str, dict]:
+        """使用 Cookie 方式签到（HTTP 请求）"""
+        details = {}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            self.provider.api_user_key: api_user,
+        }
+        cookies = {"session": session_cookie}
 
+        try:
+            async with httpx.AsyncClient(timeout=30.0, cookies=cookies) as client:
+                # 获取用户信息
+                user_info_url = f"{self.provider.domain}{self.provider.user_info_path}"
+                logger.info(f"[{self.account_name}] 获取用户信息: {user_info_url}")
+                
+                response = await client.get(user_info_url, headers=headers)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("success"):
+                        user_data = data.get("data", {})
+                        quota = round(user_data.get("quota", 0) / 500000, 2)
+                        used_quota = round(user_data.get("used_quota", 0) / 500000, 2)
+                        details["balance"] = f"${quota}"
+                        details["used"] = f"${used_quota}"
+                        logger.info(f"[{self.account_name}] 余额: ${quota}, 已用: ${used_quota}")
+                    else:
+                        return False, f"Cookie 无效: {data.get('message')}", details
+                elif response.status_code == 401:
+                    return False, "Cookie 已过期", details
+                else:
+                    return False, f"HTTP {response.status_code}", details
+
+                # 执行签到
+                if self.provider.needs_manual_check_in():
+                    checkin_url = f"{self.provider.domain}{self.provider.sign_in_path}"
+                    logger.info(f"[{self.account_name}] 执行签到: {checkin_url}")
+                    
+                    response = await client.post(checkin_url, headers=headers)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        msg = data.get("message") or data.get("msg") or ""
+                        if data.get("success") or "已签到" in msg or "签到成功" in msg:
+                            logger.success(f"[{self.account_name}] {msg or '签到成功'}")
+                            return True, msg or "签到成功", details
+                        elif "已签到" in msg:
+                            return True, msg, details
+                        return False, msg or "签到失败", details
+                    elif response.status_code == 401:
+                        return False, "Cookie 已过期", details
+                    return False, f"HTTP {response.status_code}", details
+                return True, "签到成功（自动触发）", details
+
+        except httpx.TimeoutException:
+            return False, "请求超时", details
+        except Exception as e:
+            logger.error(f"[{self.account_name}] 签到请求失败: {e}")
+            return False, f"请求失败: {e}", details
+
+    async def _wait_for_cloudflare(self, tab, timeout: int = 30) -> bool:
+        """等待 Cloudflare 挑战完成（参考 linuxdo.py）"""
+        logger.info(f"[{self.account_name}] 检测 Cloudflare 挑战...")
         start_time = asyncio.get_event_loop().time()
 
         while asyncio.get_event_loop().time() - start_time < timeout:
             try:
-                title = await self.tab.evaluate("document.title")
-
-                cf_indicators = [
-                    "just a moment",
-                    "checking your browser",
-                    "please wait",
-                    "verifying",
-                    "请稍候",
-                ]
-
+                title = await tab.evaluate("document.title")
+                cf_indicators = ["just a moment", "checking your browser", "please wait", "verifying"]
                 title_lower = title.lower() if title else ""
                 is_cf_page = any(ind in title_lower for ind in cf_indicators)
 
                 if not is_cf_page and title:
                     logger.success(f"[{self.account_name}] Cloudflare 验证通过！")
                     return True
-
                 if is_cf_page:
                     logger.debug(f"[{self.account_name}] 等待 Cloudflare... 标题: {title}")
-
             except Exception as e:
                 logger.debug(f"[{self.account_name}] 检查页面状态出错: {e}")
-
             await asyncio.sleep(2)
 
         logger.warning(f"[{self.account_name}] Cloudflare 验证超时")
         return False
 
-    async def _login_linuxdo(self) -> bool:
-        """登录 LinuxDO"""
+    async def _login_linuxdo(self, tab) -> bool:
+        """登录 LinuxDO（参考 linuxdo.py 的成功实现，使用 JS 直接赋值）"""
+        # 1. 先访问首页，让 Cloudflare 验证
         logger.info(f"[{self.account_name}] 访问 LinuxDO 首页...")
-        await self.tab.get(self.LINUXDO_URL)
+        await tab.get(self.LINUXDO_URL)
 
-        # 等待 Cloudflare
-        if not await self._wait_for_cloudflare(timeout=30):
-            await self.tab.reload()
-            if not await self._wait_for_cloudflare(timeout=20):
+        # 2. 等待 Cloudflare 挑战完成
+        cf_passed = await self._wait_for_cloudflare(tab, timeout=30)
+        if not cf_passed:
+            logger.info(f"[{self.account_name}] 尝试刷新页面...")
+            await tab.reload()
+            cf_passed = await self._wait_for_cloudflare(tab, timeout=20)
+            if not cf_passed:
+                logger.error(f"[{self.account_name}] Cloudflare 验证失败")
                 return False
 
-        # 检查是否已经登录（通过检查页面上是否有用户头像或通知按钮）
+        # 检查是否已经登录
         try:
-            is_logged_in = await self.tab.evaluate("""
+            is_logged_in = await tab.evaluate("""
                 (function() {
-                    // 检查是否有用户菜单或通知按钮（已登录的标志）
-                    const userMenu = document.querySelector('.current-user, .header-dropdown-toggle.current-user');
-                    const notifications = document.querySelector('button[aria-label*="通知"], .ring-bell-icon');
-                    return !!(userMenu || notifications);
+                    const userMenu = document.querySelector('.current-user');
+                    return !!userMenu;
                 })()
             """)
             if is_logged_in:
-                logger.success(f"[{self.account_name}] LinuxDO 已登录（检测到用户菜单）")
+                logger.success(f"[{self.account_name}] LinuxDO 已登录")
                 return True
         except Exception:
             pass
 
-        # 访问登录页
-        logger.info(f"[{self.account_name}] 访问 LinuxDO 登录页...")
-        await self.tab.get(self.LINUXDO_LOGIN_URL)
-        await asyncio.sleep(5)  # 等待页面完全加载
+        # 3. 访问登录页面
+        logger.info(f"[{self.account_name}] 访问登录页面...")
+        await tab.get(self.LINUXDO_LOGIN_URL)
+        await asyncio.sleep(5)
 
-        # 等待登录表单
-        logger.info(f"[{self.account_name}] 等待登录表单加载...")
+        # 4. 等待登录表单加载
         for _ in range(10):
             try:
-                has_input = await self.tab.evaluate("""
+                has_input = await tab.evaluate("""
                     (function() {
-                        const input = document.querySelector('#login-account-name') ||
-                                      document.querySelector('input[name="login"]');
-                        return !!input;
+                        return !!document.querySelector('#login-account-name');
                     })()
                 """)
                 if has_input:
@@ -146,103 +217,73 @@ class NewAPIBrowserCheckin:
                 pass
             await asyncio.sleep(1)
 
-        # 输入用户名
+        # 5. 使用 JS 直接赋值填写表单（参考 linuxdo.py，比 send_keys 更可靠）
         try:
-            # 等待输入框出现
-            await asyncio.sleep(1)
+            escaped_username = self.linuxdo_username.replace("\\", "\\\\").replace("'", "\\'")
+            escaped_password = self.linuxdo_password.replace("\\", "\\\\").replace("'", "\\'")
+
+            fill_result = await tab.evaluate(f"""
+                (function() {{
+                    const usernameInput = document.querySelector('#login-account-name');
+                    const passwordInput = document.querySelector('#login-account-password');
+                    if (!usernameInput || !passwordInput) return 'error: inputs not found';
+                    
+                    usernameInput.focus();
+                    usernameInput.value = '{escaped_username}';
+                    usernameInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    usernameInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    
+                    passwordInput.focus();
+                    passwordInput.value = '{escaped_password}';
+                    passwordInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    passwordInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    
+                    return 'success';
+                }})()
+            """)
             
-            username_input = await self.tab.select('#login-account-name', timeout=5)
-            if not username_input:
-                username_input = await self.tab.select('input[name="login"]', timeout=3)
-
-            if username_input:
-                await username_input.click()
-                await asyncio.sleep(0.3)
-                # 使用 apply 强制聚焦
-                await username_input.apply("(elem) => elem.focus()")
-                await asyncio.sleep(0.2)
-                # 逐字输入（模拟真人）
-                for char in self.linuxdo_username:
-                    await username_input.send_keys(char)
-                    await asyncio.sleep(0.05)
-                logger.info(f"[{self.account_name}] 已输入用户名")
-                await asyncio.sleep(0.5)
-            else:
-                logger.error(f"[{self.account_name}] 未找到用户名输入框")
+            if fill_result != 'success':
+                logger.error(f"[{self.account_name}] 填写表单失败: {fill_result}")
                 return False
+            logger.info(f"[{self.account_name}] 已填写用户名和密码")
         except Exception as e:
-            logger.error(f"[{self.account_name}] 输入用户名失败: {e}")
+            logger.error(f"[{self.account_name}] 填写表单失败: {e}")
             return False
 
-        # 输入密码
-        try:
-            password_input = await self.tab.select('#login-account-password', timeout=5)
-            if not password_input:
-                password_input = await self.tab.select('input[type="password"]', timeout=3)
-
-            if password_input:
-                await password_input.click()
-                await asyncio.sleep(0.3)
-                # 使用 apply 强制聚焦
-                await password_input.apply("(elem) => elem.focus()")
-                await asyncio.sleep(0.2)
-                # 逐字输入（模拟真人）
-                for char in self.linuxdo_password:
-                    await password_input.send_keys(char)
-                    await asyncio.sleep(0.05)
-                logger.info(f"[{self.account_name}] 已输入密码")
-                await asyncio.sleep(0.5)
-            else:
-                logger.error(f"[{self.account_name}] 未找到密码输入框")
-                return False
-        except Exception as e:
-            logger.error(f"[{self.account_name}] 输入密码失败: {e}")
-            return False
-
-        # 点击登录
+        # 6. 点击登录按钮
         logger.info(f"[{self.account_name}] 点击登录按钮...")
+        await asyncio.sleep(1)
         try:
-            await asyncio.sleep(1)
-            clicked = await self.tab.evaluate("""
+            clicked = await tab.evaluate("""
                 (function() {
-                    const btn = document.querySelector('#login-button, button[type="submit"]');
+                    const btn = document.querySelector('#login-button');
                     if (btn) { btn.click(); return true; }
                     return false;
                 })()
             """)
             if not clicked:
-                logger.warning(f"[{self.account_name}] 未找到登录按钮")
+                logger.error(f"[{self.account_name}] 未找到登录按钮")
                 return False
         except Exception as e:
             logger.error(f"[{self.account_name}] 点击登录失败: {e}")
             return False
 
-        # 等待登录完成（简化检测逻辑，参考 linuxdo.py 的成功实现）
+        # 7. 等待登录完成
         logger.info(f"[{self.account_name}] 等待登录完成...")
-        for i in range(60):  # 增加到 60 秒
+        for i in range(60):
             await asyncio.sleep(1)
+            current_url = tab.target.url if hasattr(tab, 'target') else ""
 
-            # 主要通过 URL 变化来判断登录状态（最可靠的方式）
-            current_url = self.tab.target.url if hasattr(self.tab, 'target') else ""
-
-            # 如果 URL 不再包含 login，说明登录成功
             if current_url and "login" not in current_url.lower() and "linux.do" in current_url:
                 logger.info(f"[{self.account_name}] 页面已跳转: {current_url}")
                 break
 
-            # 检查是否有错误提示（每 5 秒检查一次）
             if i % 5 == 0:
                 try:
-                    error_msg = await self.tab.evaluate("""
+                    error_msg = await tab.evaluate("""
                         (function() {
-                            const selectors = ['.alert-error', '.error', '.login-error', '#login-error'];
-                            for (const sel of selectors) {
-                                const el = document.querySelector(sel);
-                                if (el && el.innerText && el.innerText.trim()) {
-                                    return el.innerText.trim();
-                                }
-                            }
-                            return '';
+                            const el = document.querySelector('.alert-error, .login-error');
+                            return el ? el.innerText.trim() : '';
                         })()
                     """)
                     if error_msg:
@@ -255,10 +296,7 @@ class NewAPIBrowserCheckin:
                 logger.debug(f"[{self.account_name}] 等待登录... ({i}s)")
 
         await asyncio.sleep(2)
-
-        # 最终检查登录状态
-        current_url = self.tab.target.url if hasattr(self.tab, 'target') else ""
-        logger.info(f"[{self.account_name}] 当前 URL: {current_url}")
+        current_url = tab.target.url if hasattr(tab, 'target') else ""
 
         if "login" in current_url.lower():
             logger.error(f"[{self.account_name}] 登录失败，仍在登录页面")
@@ -267,347 +305,211 @@ class NewAPIBrowserCheckin:
         logger.success(f"[{self.account_name}] LinuxDO 登录成功！")
         return True
 
-    async def _oauth_login_to_site(self) -> bool:
-        """通过 LinuxDO OAuth 登录到目标站点"""
+    async def _oauth_login_and_get_session(self, tab) -> tuple[str | None, str | None]:
+        """通过 LinuxDO OAuth 登录并获取 session 和 api_user"""
         login_url = f"{self.provider.domain}{self.provider.login_path}"
         logger.info(f"[{self.account_name}] 访问站点登录页: {login_url}")
 
-        await self.tab.get(login_url)
+        await tab.get(login_url)
+        await asyncio.sleep(5)
+        await self._wait_for_cloudflare(tab, timeout=15)
+
+        # 检查是否已经登录
+        current_url = tab.target.url if hasattr(tab, 'target') else ""
+        if self.provider.domain in current_url and "login" not in current_url.lower():
+            logger.success(f"[{self.account_name}] 已登录，直接获取 session")
+            return await self._extract_session_from_browser(tab)
+
+        # 等待页面加载并查找 LinuxDO 按钮
+        logger.info(f"[{self.account_name}] 查找 LinuxDO OAuth 登录按钮...")
         await asyncio.sleep(3)
 
-        # 等待 Cloudflare（如果有）
-        await self._wait_for_cloudflare(timeout=15)
+        # 打印页面内容帮助调试
+        try:
+            page_text = await tab.evaluate("document.body.innerText.substring(0, 500)")
+            logger.debug(f"[{self.account_name}] 页面内容: {page_text[:200]}...")
+        except Exception:
+            pass
 
-        # 检查是否已经登录（直接跳转到控制台）
-        current_url = self.tab.target.url if hasattr(self.tab, 'target') else ""
-        if self.provider.domain in current_url and "login" not in current_url.lower():
-            logger.success(f"[{self.account_name}] 已登录，直接进入控制台")
-            return True
-
-        # 查找并点击 LinuxDO OAuth 按钮
-        logger.info(f"[{self.account_name}] 查找 LinuxDO OAuth 登录按钮...")
-
-        # 等待页面加载
-        await asyncio.sleep(2)
-
+        # 点击 LinuxDO OAuth 按钮
         for attempt in range(5):
             try:
-                # 尝试多种选择器
-                clicked = await self.tab.evaluate("""
+                clicked = await tab.evaluate("""
                     (function() {
-                        // 先尝试包含 LinuxDO 文字的按钮/链接
-                        const clickables = document.querySelectorAll('button, a, div[role="button"]');
-                        for (const el of clickables) {
-                            const text = (el.innerText || el.textContent || '').toLowerCase();
-                            // 匹配各种可能的文字
-                            if (text.includes('linuxdo') || text.includes('linux do') || 
-                                text.includes('使用 linuxdo') || text.includes('linuxdo 继续')) {
+                        const allElements = document.querySelectorAll('*');
+                        for (const el of allElements) {
+                            const text = (el.innerText || '').toLowerCase();
+                            if (text.includes('linuxdo') && (text.includes('继续') || text.includes('登录'))) {
                                 el.click();
-                                return 'linuxdo_button: ' + text.substring(0, 30);
+                                return 'clicked: ' + text.substring(0, 40);
                             }
                         }
-
-                        // 尝试通过 class 或 href 查找
-                        const selectors = [
-                            '[class*="linuxdo"]',
-                            '[class*="oauth"]',
-                            'a[href*="linuxdo"]',
-                            'a[href*="oauth"]',
-                        ];
-                        for (const sel of selectors) {
-                            try {
-                                const el = document.querySelector(sel);
-                                if (el) {
-                                    el.click();
-                                    return 'selector: ' + sel;
-                                }
-                            } catch (e) {}
-                        }
-
                         return null;
                     })()
                 """)
-
                 if clicked:
                     logger.info(f"[{self.account_name}] 点击了 OAuth 按钮: {clicked}")
                     break
-                else:
-                    logger.debug(f"[{self.account_name}] 第 {attempt + 1} 次尝试未找到 OAuth 按钮")
-
+                logger.debug(f"[{self.account_name}] 第 {attempt + 1} 次尝试未找到 OAuth 按钮")
             except Exception as e:
                 logger.debug(f"[{self.account_name}] 查找 OAuth 按钮出错: {e}")
-
             await asyncio.sleep(1)
 
-        # 等待 OAuth 跳转和授权
+        # 等待 OAuth 授权
         logger.info(f"[{self.account_name}] 等待 OAuth 授权...")
         await asyncio.sleep(3)
+        browser = self._browser_manager.browser
 
-        # 记录原始标签页（NewAPI 登录页）
-        original_tab = self.tab
-        auth_tab = None
-
-        # 检查是否需要授权确认（最多等待 30 秒）
+        # 处理授权页面（可能在新标签页）
         for i in range(30):
-            # 检查是否有新标签页打开（OAuth 可能在新标签页打开）
-            if len(self.browser.tabs) > 1 and auth_tab is None:
-                logger.info(f"[{self.account_name}] 检测到 {len(self.browser.tabs)} 个标签页")
-                
-                # 找到授权页面标签页
-                for tab in self.browser.tabs:
-                    tab_url = tab.target.url if hasattr(tab, 'target') else ""
-                    if "connect.linux.do" in tab_url or "authorize" in tab_url.lower():
-                        logger.info(f"[{self.account_name}] 找到授权标签页: {tab_url}")
-                        await tab.bring_to_front()
-                        auth_tab = tab
-                        self.tab = tab
+            # 检查新标签页
+            if len(browser.tabs) > 1:
+                for t in browser.tabs:
+                    t_url = t.target.url if hasattr(t, 'target') else ""
+                    if "connect.linux.do" in t_url or "authorize" in t_url.lower():
+                        logger.info(f"[{self.account_name}] 找到授权标签页: {t_url}")
+                        await t.bring_to_front()
+                        tab = t
                         await asyncio.sleep(1)
                         break
 
-            current_url = self.tab.target.url if hasattr(self.tab, 'target') else ""
+            current_url = tab.target.url if hasattr(tab, 'target') else ""
 
-            # 如果当前标签页已经是目标站点且不是登录页，说明授权成功
+            # 如果已经在目标站点且不是登录页，获取 session
             if self.provider.domain in current_url and "login" not in current_url.lower():
-                logger.success(f"[{self.account_name}] OAuth 登录成功！当前页面: {current_url}")
-                return True
+                logger.success(f"[{self.account_name}] OAuth 登录成功！")
+                return await self._extract_session_from_browser(tab)
 
-            # 如果在 LinuxDO 授权页面，点击允许
+            # 如果在授权页面，点击允许
             if "linux.do" in current_url and ("authorize" in current_url.lower() or "oauth" in current_url.lower()):
-                logger.info(f"[{self.account_name}] 检测到授权页面，尝试点击允许按钮...")
+                logger.info(f"[{self.account_name}] 检测到授权页面，尝试点击允许...")
                 await asyncio.sleep(2)
-
                 try:
-                    clicked = await self.tab.evaluate("""
+                    clicked = await tab.evaluate("""
                         (function() {
-                            const clickables = document.querySelectorAll('button, a, input[type="submit"]');
-                            for (const el of clickables) {
-                                const text = (el.innerText || el.textContent || el.value || '').trim();
+                            const els = document.querySelectorAll('button, a, input[type="submit"]');
+                            for (const el of els) {
+                                const text = (el.innerText || el.value || '').trim();
                                 if (text === '允许' || text.includes('允许')) {
                                     el.click();
-                                    return 'clicked: ' + text + ' (' + el.tagName + ')';
+                                    return 'clicked: ' + text;
                                 }
                             }
                             return null;
                         })()
                     """)
-
                     if clicked:
                         logger.info(f"[{self.account_name}] {clicked}")
-                        # 点击允许后，等待授权完成和页面跳转
                         await asyncio.sleep(3)
-                        
-                        # 授权完成后，查找已登录的目标站点标签页
-                        for _ in range(10):  # 最多等待 10 秒
-                            for tab in self.browser.tabs:
-                                tab_url = tab.target.url if hasattr(tab, 'target') else ""
-                                # 找到目标站点且不是登录页、不是 OAuth 回调页的标签页
-                                if (self.provider.domain in tab_url and 
-                                    "login" not in tab_url.lower() and
-                                    "oauth" not in tab_url.lower() and
-                                    "code=" not in tab_url):
-                                    logger.info(f"[{self.account_name}] 找到已登录的目标站点: {tab_url}")
-                                    await tab.bring_to_front()
-                                    self.tab = tab
-                                    await asyncio.sleep(1)
-                                    return True
-                            await asyncio.sleep(1)
-                        
-                        # 如果没找到完全跳转的页面，检查是否有 OAuth 回调页面（会自动跳转）
-                        for tab in self.browser.tabs:
-                            tab_url = tab.target.url if hasattr(tab, 'target') else ""
-                            if self.provider.domain in tab_url:
-                                logger.info(f"[{self.account_name}] 切换到目标站点标签页: {tab_url}")
-                                await tab.bring_to_front()
-                                self.tab = tab
-                                # 等待 OAuth 回调完成跳转
-                                for _ in range(10):
-                                    await asyncio.sleep(1)
-                                    new_url = self.tab.target.url if hasattr(self.tab, 'target') else ""
-                                    if "login" not in new_url.lower() and "oauth" not in new_url.lower() and "code=" not in new_url:
-                                        logger.success(f"[{self.account_name}] OAuth 回调完成: {new_url}")
-                                        return True
-                                break
-                    else:
-                        logger.warning(f"[{self.account_name}] 未找到允许按钮")
+                except Exception:
+                    pass
 
-                except Exception as e:
-                    logger.debug(f"[{self.account_name}] 点击授权按钮出错: {e}")
-
-            # 每隔一段时间检查所有标签页，看是否有已登录的
-            if i % 3 == 0:
-                for tab in self.browser.tabs:
-                    tab_url = tab.target.url if hasattr(tab, 'target') else ""
-                    if self.provider.domain in tab_url and "login" not in tab_url.lower():
-                        logger.info(f"[{self.account_name}] 发现已登录标签页: {tab_url}")
-                        await tab.bring_to_front()
-                        self.tab = tab
-                        return True
+            # 检查所有标签页是否有已登录的
+            for t in browser.tabs:
+                t_url = t.target.url if hasattr(t, 'target') else ""
+                if self.provider.domain in t_url and "login" not in t_url.lower():
+                    await t.bring_to_front()
+                    return await self._extract_session_from_browser(t)
 
             await asyncio.sleep(1)
-
             if i % 5 == 0 and i > 0:
                 logger.debug(f"[{self.account_name}] 等待 OAuth 完成... ({i}s)")
 
-        # 最终检查
-        current_url = self.tab.target.url if hasattr(self.tab, 'target') else ""
-        if self.provider.domain in current_url:
-            logger.success(f"[{self.account_name}] 已进入目标站点")
-            return True
+        logger.error(f"[{self.account_name}] OAuth 登录超时")
+        return None, None
 
-        logger.error(f"[{self.account_name}] OAuth 登录失败，当前 URL: {current_url}")
-        return False
-
-    async def _do_checkin(self) -> tuple[bool, str, dict]:
-        """执行签到
-
-        Returns:
-            (成功与否, 消息, 详情)
-        """
-        import json
-        details = {}
-
-        # 等待页面完全加载
-        await asyncio.sleep(2)
-
-        # 先获取 new-api-user 值（从 cookie 或 localStorage）
+    async def _extract_session_from_browser(self, tab) -> tuple[str | None, str | None]:
+        """从浏览器提取 session 和 api_user"""
+        session_cookie = None
         api_user = None
+
         try:
-            # 从 cookie 获取
             import nodriver.cdp.network as cdp_network
-            all_cookies = await self.tab.send(cdp_network.get_all_cookies())
-            for c in all_cookies:
-                if c.name == self.provider.api_user_key:
-                    api_user = c.value
-                    logger.info(f"[{self.account_name}] 从 cookie 获取到 api_user: {api_user}")
-                    break
+            all_cookies = await tab.send(cdp_network.get_all_cookies())
             
-            # 如果 cookie 中没有，尝试从 localStorage 获取
+            for cookie in all_cookies:
+                if cookie.name == "session":
+                    session_cookie = cookie.value
+                    logger.info(f"[{self.account_name}] 获取到 session: {session_cookie[:30]}...")
+                elif cookie.name == self.provider.api_user_key:
+                    api_user = cookie.value
+                    logger.info(f"[{self.account_name}] 获取到 api_user: {api_user}")
+
             if not api_user:
-                api_user = await self.tab.evaluate(f'''
+                api_user = await tab.evaluate(f'''
                     localStorage.getItem("{self.provider.api_user_key}") || 
-                    localStorage.getItem("user_id") || 
-                    localStorage.getItem("userId")
+                    localStorage.getItem("user_id")
                 ''')
                 if api_user:
                     logger.info(f"[{self.account_name}] 从 localStorage 获取到 api_user: {api_user}")
+
         except Exception as e:
-            logger.warning(f"[{self.account_name}] 获取 api_user 失败: {e}")
+            logger.error(f"[{self.account_name}] 提取 session 失败: {e}")
 
-        # 使用同步 XMLHttpRequest 发送请求
-        # 1. 先获取用户信息
-        user_info_url = f"{self.provider.domain}{self.provider.user_info_path}"
-        logger.info(f"[{self.account_name}] 获取用户信息: {user_info_url}")
-
-        # 构建请求头 JS
-        api_user_header = f'xhr.setRequestHeader("{self.provider.api_user_key}", "{api_user}");' if api_user else ''
-
-        try:
-            user_info_result = await self.tab.evaluate(f'''
-                (function() {{
-                    var xhr = new XMLHttpRequest();
-                    xhr.open("GET", "{user_info_url}", false);
-                    xhr.setRequestHeader("Accept", "application/json");
-                    {api_user_header}
-                    xhr.withCredentials = true;
-                    try {{
-                        xhr.send();
-                        return JSON.stringify({{status: xhr.status, data: JSON.parse(xhr.responseText)}});
-                    }} catch (e) {{
-                        return JSON.stringify({{error: e.message, status: xhr.status}});
-                    }}
-                }})()
-            ''')
-
-            logger.debug(f"[{self.account_name}] 用户信息响应: {user_info_result}")
-            
-            if user_info_result:
-                result = json.loads(user_info_result)
-                if result.get("status") == 200 and result.get("data", {}).get("success"):
-                    user_data = result["data"].get("data", {})
-                    quota = round(user_data.get("quota", 0) / 500000, 2)
-                    used_quota = round(user_data.get("used_quota", 0) / 500000, 2)
-                    details["balance"] = f"${quota}"
-                    details["used"] = f"${used_quota}"
-                    logger.info(f"[{self.account_name}] 余额: ${quota}, 已用: ${used_quota}")
-                else:
-                    logger.warning(f"[{self.account_name}] 获取用户信息失败: {result}")
-        except Exception as e:
-            logger.warning(f"[{self.account_name}] 获取用户信息失败: {e}")
-
-        # 2. 执行签到（如果需要）
-        if self.provider.needs_manual_check_in():
-            checkin_url = f"{self.provider.domain}{self.provider.sign_in_path}"
-            logger.info(f"[{self.account_name}] 执行签到: {checkin_url}")
-
-            try:
-                checkin_result = await self.tab.evaluate(f'''
-                    (function() {{
-                        var xhr = new XMLHttpRequest();
-                        xhr.open("POST", "{checkin_url}", false);
-                        xhr.setRequestHeader("Accept", "application/json");
-                        xhr.setRequestHeader("Content-Type", "application/json");
-                        {api_user_header}
-                        xhr.withCredentials = true;
-                        try {{
-                            xhr.send();
-                            return JSON.stringify({{status: xhr.status, data: JSON.parse(xhr.responseText)}});
-                        }} catch (e) {{
-                            return JSON.stringify({{error: e.message, status: xhr.status}});
-                        }}
-                    }})()
-                ''')
-
-                logger.debug(f"[{self.account_name}] 签到响应: {checkin_result}")
-
-                if checkin_result:
-                    result = json.loads(checkin_result)
-
-                    if result.get("status") == 200:
-                        data = result.get("data", {})
-                        msg = data.get("message") or data.get("msg") or ""
-
-                        if data.get("success") or "已签到" in msg or "签到成功" in msg:
-                            msg = msg or "签到成功"
-                            logger.success(f"[{self.account_name}] {msg}")
-                            return True, msg, details
-                        else:
-                            if "已签到" in msg or "already" in msg.lower():
-                                logger.info(f"[{self.account_name}] {msg}")
-                                return True, msg, details
-                            return False, msg or "签到失败", details
-                    elif result.get("status") == 401:
-                        return False, "未授权，请检查登录状态", details
-                    elif result.get("error"):
-                        return False, f"请求错误: {result.get('error')}", details
-                    else:
-                        return False, f"HTTP {result.get('status')}", details
-
-            except Exception as e:
-                logger.error(f"[{self.account_name}] 签到请求失败: {e}")
-                return False, f"签到失败: {e}", details
-        else:
-            # 不需要手动签到
-            return True, "签到成功（自动触发）", details
-
-        return False, "签到失败", details
+        return session_cookie, api_user
 
     async def run(self) -> CheckinResult:
         """执行完整的签到流程"""
         try:
-            # 启动浏览器
-            logger.info(f"[{self.account_name}] 启动浏览器...")
-            self.browser = await uc.start(
-                headless=False,  # 非 headless 更不容易被检测
-                browser_args=[
-                    "--disable-dev-shm-usage",
-                    "--no-first-run",
-                    "--disable-blink-features=AutomationControlled",
-                ]
-            )
-            self.tab = await self.browser.get("about:blank")
+            # 1. 优先尝试使用预设的 Cookie
+            if self._preset_cookies and self._preset_api_user:
+                session_cookie = self._preset_cookies.get("session")
+                if session_cookie:
+                    logger.info(f"[{self.account_name}] 尝试使用预设 Cookie 签到...")
+                    success, message, details = await self._checkin_with_cookies(session_cookie, self._preset_api_user)
+                    
+                    if success:
+                        self._login_method = "cookie"
+                        details["login_method"] = "cookie"
+                        return CheckinResult(
+                            platform=f"NewAPI ({self.provider_name})",
+                            account=self.account_name,
+                            status=CheckinStatus.SUCCESS,
+                            message=message,
+                            details=details,
+                        )
+                    elif "过期" not in message and "401" not in message:
+                        return CheckinResult(
+                            platform=f"NewAPI ({self.provider_name})",
+                            account=self.account_name,
+                            status=CheckinStatus.FAILED,
+                            message=message,
+                            details=details,
+                        )
+                    logger.warning(f"[{self.account_name}] Cookie 已过期，尝试 OAuth 登录...")
 
-            # 1. 登录 LinuxDO
-            if not await self._login_linuxdo():
+            # 2. Cookie 无效，使用浏览器 OAuth 登录
+            if not self.linuxdo_username or not self.linuxdo_password:
+                return CheckinResult(
+                    platform=f"NewAPI ({self.provider_name})",
+                    account=self.account_name,
+                    status=CheckinStatus.FAILED,
+                    message="Cookie 无效且未提供 LinuxDO 账号密码",
+                )
+
+            # 启动浏览器（参考 linuxdo.py 使用 BrowserManager）
+            logger.info(f"[{self.account_name}] 启动浏览器进行 OAuth 登录...")
+            
+            is_ci = bool(os.environ.get("CI")) or bool(os.environ.get("GITHUB_ACTIONS"))
+            display_set = bool(os.environ.get("DISPLAY"))
+            
+            # 默认使用非 headless 模式（更容易绕过 Cloudflare）
+            # 只有明确设置 BROWSER_HEADLESS=true 才使用 headless
+            headless = os.environ.get("BROWSER_HEADLESS", "false").lower() == "true"
+            
+            if is_ci and display_set:
+                headless = False
+                logger.info(f"[{self.account_name}] CI 环境使用非 headless 模式")
+
+            engine = get_browser_engine()
+            max_retries = 5 if is_ci else 3
+            self._browser_manager = BrowserManager(engine=engine, headless=headless)
+            await self._browser_manager.start(max_retries=max_retries)
+
+            tab = self._browser_manager.page
+
+            # 登录 LinuxDO
+            if not await self._login_linuxdo(tab):
                 return CheckinResult(
                     platform=f"NewAPI ({self.provider_name})",
                     account=self.account_name,
@@ -615,24 +517,32 @@ class NewAPIBrowserCheckin:
                     message="LinuxDO 登录失败",
                 )
 
-            # 2. OAuth 登录到目标站点
-            if not await self._oauth_login_to_site():
+            # OAuth 登录并获取 session
+            session_cookie, api_user = await self._oauth_login_and_get_session(tab)
+            
+            if not session_cookie or not api_user:
                 return CheckinResult(
                     platform=f"NewAPI ({self.provider_name})",
                     account=self.account_name,
                     status=CheckinStatus.FAILED,
-                    message="OAuth 登录失败",
+                    message="OAuth 登录失败，无法获取 session",
                 )
 
-            # 3. 执行签到
-            success, message, details = await self._do_checkin()
+            # 3. 使用新获取的 session 签到
+            logger.info(f"[{self.account_name}] 使用新 session 签到...")
+            success, message, details = await self._checkin_with_cookies(session_cookie, api_user)
+            
+            self._login_method = "oauth"
+            details["login_method"] = "oauth"
+            details["new_session"] = session_cookie[:20] + "..."
+            details["new_api_user"] = api_user
 
             return CheckinResult(
                 platform=f"NewAPI ({self.provider_name})",
                 account=self.account_name,
                 status=CheckinStatus.SUCCESS if success else CheckinStatus.FAILED,
                 message=message,
-                details=details if details else None,
+                details=details,
             )
 
         except Exception as e:
@@ -645,34 +555,53 @@ class NewAPIBrowserCheckin:
             )
 
         finally:
-            # 关闭浏览器
-            if self.browser:
+            if self._browser_manager:
                 logger.info(f"[{self.account_name}] 关闭浏览器...")
-                self.browser.stop()
-                await asyncio.sleep(1)
+                await self._browser_manager.close()
 
 
 async def browser_checkin_newapi(
     provider_name: str,
-    linuxdo_username: str,
-    linuxdo_password: str,
+    linuxdo_username: str | None = None,
+    linuxdo_password: str | None = None,
+    cookies: dict | str | None = None,
+    api_user: str | None = None,
     account_name: str | None = None,
 ) -> CheckinResult:
-    """便捷函数：使用浏览器签到 NewAPI 站点
-
-    Args:
-        provider_name: 站点名称
-        linuxdo_username: LinuxDO 用户名
-        linuxdo_password: LinuxDO 密码
-        account_name: 账号显示名称
-
-    Returns:
-        签到结果
-    """
+    """便捷函数：使用浏览器签到 NewAPI 站点"""
     checker = NewAPIBrowserCheckin(
         provider_name=provider_name,
         linuxdo_username=linuxdo_username,
         linuxdo_password=linuxdo_password,
+        cookies=cookies,
+        api_user=api_user,
         account_name=account_name,
     )
     return await checker.run()
+
+
+def load_linuxdo_accounts(config_path: str = "签到账户/签到账户linuxdo.json") -> list[dict]:
+    """从配置文件加载 LinuxDO 账户
+    
+    配置格式：
+    [
+        {
+            "username": "email@example.com",
+            "password": "password",
+            "name": "显示名称",
+            "level": 3,
+            "browse_enabled": true
+        }
+    ]
+    """
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            accounts = json.load(f)
+        logger.info(f"从 {config_path} 加载了 {len(accounts)} 个 LinuxDO 账户")
+        return accounts
+    except FileNotFoundError:
+        logger.warning(f"配置文件不存在: {config_path}")
+        return []
+    except Exception as e:
+        logger.error(f"加载配置文件失败: {e}")
+        return []
