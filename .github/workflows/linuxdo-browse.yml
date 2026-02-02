@@ -38,6 +38,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb google-chrome-stable
       
+      # 安装 Patchright 浏览器
+      - name: Install Patchright browsers
+        run: uv run patchright install chromium
+      
       # 执行 LinuxDO 浏览
       - name: Execute LinuxDO browse
         env:
