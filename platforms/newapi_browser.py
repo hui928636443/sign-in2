@@ -423,7 +423,8 @@ class NewAPIBrowserCheckin:
         for attempt in range(5):
             try:
                 # 策略1: 查找包含 linuxdo 的链接（最可靠）
-                clicked_result = await tab.evaluate("""
+                # 使用原始字符串避免 Python 转义序列警告
+                clicked_result = await tab.evaluate(r"""
                     (function() {
                         // 策略1: 查找 href 包含 linuxdo 或 oauth 的链接
                         const links = document.querySelectorAll('a[href*="linuxdo"], a[href*="oauth/linuxdo"]');
