@@ -679,9 +679,8 @@ class NewAPIBrowserCheckin:
             await self._save_debug_screenshot(tab, "already_logged_in")
             return await self._extract_session_from_browser(tab)
 
-        # 等待 SPA 页面渲染完成（Wong 等站点的按钮需要 JS 框架加载后才出现）
-        logger.info(f"[{self.account_name}] 查找 LinuxDO OAuth 登录按钮...")
-        await asyncio.sleep(10)
+        # 等待 SPA 页面渲染（最多 5 秒）
+        await asyncio.sleep(5)
 
         # Debug 模式：打印页面上所有可点击元素帮助调试
         if self._debug:
@@ -886,9 +885,80 @@ class NewAPIBrowserCheckin:
                 logger.debug(f"[{self.account_name}] 查找 OAuth 按钮出错: {e}")
             await asyncio.sleep(1)
 
-        if not clicked:
-            logger.warning(f"[{self.account_name}] 未找到 LinuxDO OAuth 按钮")
-            await self._save_debug_screenshot(tab, "oauth_button_not_found")
+        if not clicked and not oauth_path:
+            # 登录页没找到 OAuth 按钮，尝试注册页（不对已配 oauth_path 的站点走注册页）
+            register_url = f"{self.provider.domain}/register"
+            logger.info(f"[{self.account_name}] 登录页未找到 OAuth 按钮，尝试注册页: {register_url}")
+            await tab.get(register_url)
+            await asyncio.sleep(3)
+            await self._save_debug_screenshot(tab, "register_page")
+
+            # 在注册页重新查找 OAuth 按钮（同样用 mouse_click）
+            for attempt in range(3):
+                try:
+                    btn_rect = await tab.evaluate(r"""
+                        (function() {
+                            function getRect(el, desc) {
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0)
+                                    return [rect.x, rect.y, rect.width, rect.height, desc];
+                                return null;
+                            }
+                            const links = document.querySelectorAll('a[href*="linuxdo"], a[href*="oauth/linuxdo"]');
+                            for (const link of links) {
+                                const r = getRect(link, 'link: ' + (link.href||'').substring(0,50));
+                                if (r) return r;
+                            }
+                            const allClickable = document.querySelectorAll('button, a, [role="button"], div[onclick], span[onclick]');
+                            const patterns = [
+                                /linux\s*do/i, /使用.*linux/i, /通过.*linux/i,
+                                /continue.*linux/i, /login.*linux/i
+                            ];
+                            for (const el of allClickable) {
+                                const text = (el.innerText || el.textContent || '').trim();
+                                for (const p of patterns) {
+                                    if (p.test(text)) {
+                                        const r = getRect(el, 'text: ' + text.substring(0,30));
+                                        if (r) return r;
+                                    }
+                                }
+                            }
+                            // "使用...继续" 图标按钮
+                            for (const el of allClickable) {
+                                const text = (el.innerText || '').replace(/\s+/g, '').trim();
+                                if (/使用.*继续/.test(text)) {
+                                    const r = getRect(el, 'icon-btn: ' + (el.innerText||'').trim().substring(0,20));
+                                    if (r) return r;
+                                }
+                            }
+                            return null;
+                        })()
+                    """)
+                    if btn_rect and isinstance(btn_rect, (list, tuple)) and len(btn_rect) >= 4:
+                        x = self._to_float(btn_rect[0])
+                        y = self._to_float(btn_rect[1])
+                        w = self._to_float(btn_rect[2])
+                        h = self._to_float(btn_rect[3])
+                        desc = btn_rect[4] if len(btn_rect) > 4 else '?'
+                        if isinstance(desc, dict):
+                            desc = desc.get('value', desc)
+                        click_x = x + w / 2
+                        click_y = y + h / 2
+                        logger.info(
+                            f"[{self.account_name}] 注册页找到 OAuth: {desc}, "
+                            f"物理点击 ({click_x:.0f}, {click_y:.0f})"
+                        )
+                        await tab.mouse_click(click_x, click_y)
+                        await self._save_debug_screenshot(tab, "register_oauth_clicked")
+                        clicked = True
+                        break
+                except Exception as e:
+                    logger.debug(f"[{self.account_name}] 注册页查找 OAuth 按钮出错: {e}")
+                await asyncio.sleep(1)
+
+            if not clicked:
+                logger.warning(f"[{self.account_name}] 登录页和注册页均未找到 LinuxDO OAuth 按钮")
+                await self._save_debug_screenshot(tab, "oauth_button_not_found")
 
         # 等待 OAuth 授权
         logger.info(f"[{self.account_name}] 等待 OAuth 授权...")

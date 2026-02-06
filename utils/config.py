@@ -421,6 +421,9 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
     "wong": {
         "domain": "https://wzw.pp.ua",
         "sign_in_path": "/api/user/checkin",
+        # Wong 的 SPA 框架和 nodriver CDP 有兼容性问题（evaluate 挂起）
+        # 直接用 OAuth 路径跳转，不通过页面按钮
+        "oauth_path": "/oauth/linuxdo",
     },
     "elysiver": {
         "domain": "https://elysiver.h-e.top",
