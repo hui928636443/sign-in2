@@ -51,6 +51,8 @@ class PlatformManager:
         self._newapi_override_file = os.getenv(
             "NEWAPI_ACCOUNTS_OVERRIDE_FILE", ".newapi_accounts_override.json"
         )
+        self._newapi_original_state: dict[int, dict] = {}
+        self._newapi_override_applied_accounts: set[int] = set()
         # 缓存 LinuxDO 账户，用于浏览器回退登录
         self._linuxdo_accounts: list[dict] = []
         self._load_linuxdo_accounts()
@@ -115,9 +117,15 @@ class PlatformManager:
             if not hit:
                 continue
 
+            # 记录原始值，便于覆盖cookie失效后回退
+            self._newapi_original_state[id(account)] = {
+                "cookies": account.cookies,
+                "api_user": account.api_user,
+            }
             # 只在内存中覆盖；后续运行将优先使用这个新值
             account.cookies = hit["cookies"]
             account.api_user = hit["api_user"]
+            self._newapi_override_applied_accounts.add(id(account))
             applied += 1
 
             source = hit.get("source", "override")
@@ -128,6 +136,48 @@ class PlatformManager:
 
         if applied:
             logger.success(f"已应用 {applied} 个 NEWAPI 账号覆盖Cookie")
+
+    def _remove_newapi_account_override(self, account: AnyRouterAccount, provider_name: str) -> None:
+        """删除某账号的覆盖记录（覆盖cookie失效时调用）。"""
+        payload = self._load_newapi_accounts_override()
+        if not payload:
+            return
+
+        original = self._newapi_original_state.get(id(account), {})
+        original_api_user = original.get("api_user")
+        current_api_user = account.api_user
+        current_name = account.name
+
+        delete_keys: list[str] = []
+        for key, value in payload.items():
+            if not isinstance(value, dict):
+                continue
+            if str(value.get("provider", "")) != provider_name:
+                continue
+            val_name = value.get("name")
+            val_api_user = value.get("api_user")
+            if current_name and val_name == current_name:
+                delete_keys.append(key)
+                continue
+            if val_api_user and val_api_user in {current_api_user, original_api_user}:
+                delete_keys.append(key)
+
+        if not delete_keys:
+            return
+        for key in delete_keys:
+            payload.pop(key, None)
+        self._save_newapi_accounts_override(payload)
+        logger.warning(f"已删除失效覆盖Cookie记录: {provider_name}/{current_name or current_api_user}")
+
+    def _restore_newapi_account_original(self, account: AnyRouterAccount) -> bool:
+        """恢复账号到 NEWAPI_ACCOUNTS 原始 cookie/api_user。"""
+        original = self._newapi_original_state.get(id(account))
+        if not original:
+            return False
+        account.cookies = original.get("cookies")
+        account.api_user = original.get("api_user")
+        self._newapi_override_applied_accounts.discard(id(account))
+        return True
 
     def _persist_newapi_account_override(
         self,
@@ -1408,7 +1458,7 @@ class PlatformManager:
                     continue
 
             logger.info(f"开始签到: {account_name} ({provider_name})")
-            logger.info(f"[{account_name}] 优先使用 NEWAPI_ACCOUNTS 当前Cookie尝试签到")
+            logger.info(f"[{account_name}] 优先使用 GitHub 持久化Cookie，其次 NEWAPI_ACCOUNTS Cookie")
 
             # 检查是否需要直接使用浏览器 OAuth（某些站点有 Cloudflare 保护）
             if provider.bypass_method == "browser_oauth":
@@ -1421,6 +1471,37 @@ class PlatformManager:
                 })
                 continue
 
+            # ===== 1) GitHub 持久化缓存 Cookie 优先 =====
+            cached = self._cookie_cache.get(provider_name, account_name)
+            if cached:
+                logger.info(f"[{account_name}] 检测到持久化Cookie，优先尝试")
+                try:
+                    cached_account = AnyRouterAccount(
+                        cookies={"session": cached["session"]},
+                        api_user=cached["api_user"],
+                        provider=account.provider,
+                        name=account.name,
+                    )
+                    cached_result = await self._checkin_newapi(cached_account, provider, account_name)
+                    if cached_result.status == CheckinStatus.SUCCESS:
+                        cached_result.message = f"{cached_result.message} (GitHub持久化Cookie)"
+                        if cached_result.details is None:
+                            cached_result.details = {}
+                        cached_result.details["login_method"] = "github_persisted_cookie"
+                        results.append(cached_result)
+                        logger.success(f"[{account_name}] 持久化Cookie签到成功")
+                        continue
+
+                    msg = cached_result.message or ""
+                    if "401" in msg or "403" in msg or "过期" in msg:
+                        logger.warning(f"[{account_name}] 持久化Cookie已失效，删除缓存")
+                        self._cookie_cache.invalidate(provider_name, account_name)
+                    else:
+                        logger.warning(f"[{account_name}] 持久化Cookie尝试失败，继续用配置Cookie: {msg}")
+                except Exception as e:
+                    logger.warning(f"[{account_name}] 持久化Cookie尝试异常，删除缓存后继续: {e}")
+                    self._cookie_cache.invalidate(provider_name, account_name)
+
             try:
                 result = await self._checkin_newapi(account, provider, account_name)
 
@@ -1428,11 +1509,37 @@ class PlatformManager:
                 if result.status == CheckinStatus.FAILED:
                     msg = result.message or ""
                     if "401" in msg or "403" in msg or "过期" in msg:
-                        logger.warning(f"[{account_name}] Cookie 失效，标记为需要浏览器回退")
-                        # NEWAPI_ACCOUNTS 当前 cookie 失败后，再尝试一次本地缓存 cookie（若存在）
+                        logger.warning(f"[{account_name}] 配置Cookie失效，准备回退处理")
+
+                        # 若当前是覆盖cookie，先删除覆盖并恢复 NEWAPI_ACCOUNTS 原始值再试一次
+                        if id(account) in self._newapi_override_applied_accounts:
+                            logger.warning(f"[{account_name}] 当前为覆盖Cookie且已失效，删除覆盖并恢复原始配置重试")
+                            self._remove_newapi_account_override(account, provider_name)
+                            restored = self._restore_newapi_account_original(account)
+                            if restored:
+                                # 覆盖失效时，相关持久化缓存也同步清理
+                                self._cookie_cache.invalidate(provider_name, account_name)
+                                try:
+                                    restored_result = await self._checkin_newapi(account, provider, account_name)
+                                    if restored_result.status == CheckinStatus.SUCCESS:
+                                        restored_result.message = f"{restored_result.message} (恢复原始NEWAPI_ACCOUNTS)"
+                                        if restored_result.details is None:
+                                            restored_result.details = {}
+                                        restored_result.details["login_method"] = "newapi_accounts_restored"
+                                        results.append(restored_result)
+                                        logger.success(f"[{account_name}] 恢复原始配置Cookie后签到成功")
+                                        continue
+                                    msg2 = restored_result.message or ""
+                                    if "401" not in msg2 and "403" not in msg2 and "过期" not in msg2:
+                                        results.append(restored_result)
+                                        continue
+                                except Exception as e:
+                                    logger.warning(f"[{account_name}] 恢复原始配置后重试异常: {e}")
+
+                        # NEWAPI_ACCOUNTS 当前 cookie 失败后，最后再尝试一次本地缓存 cookie（若仍存在）
                         cached = self._cookie_cache.get(provider_name, account_name)
                         if cached:
-                            logger.info(f"[{account_name}] 检测到缓存Cookie，作为二次兜底再尝试一次")
+                            logger.info(f"[{account_name}] 检测到缓存Cookie，作为最终兜底再尝试一次")
                             try:
                                 cached_account = AnyRouterAccount(
                                     cookies={"session": cached["session"]},
@@ -1442,13 +1549,16 @@ class PlatformManager:
                                 )
                                 cached_result = await self._checkin_newapi(cached_account, provider, account_name)
                                 if cached_result.status == CheckinStatus.SUCCESS:
-                                    cached_result.message = f"{cached_result.message} (缓存Cookie兜底)"
+                                    cached_result.message = f"{cached_result.message} (缓存Cookie最终兜底)"
                                     if cached_result.details is None:
                                         cached_result.details = {}
-                                    cached_result.details["login_method"] = "cached_cookie_fallback"
+                                    cached_result.details["login_method"] = "cached_cookie_last_fallback"
                                     results.append(cached_result)
-                                    logger.success(f"[{account_name}] 缓存Cookie兜底签到成功！")
+                                    logger.success(f"[{account_name}] 缓存Cookie最终兜底签到成功！")
                                     continue
+                                msg3 = cached_result.message or ""
+                                if "401" in msg3 or "403" in msg3 or "过期" in msg3:
+                                    self._cookie_cache.invalidate(provider_name, account_name)
                             except Exception as e:
                                 logger.warning(f"[{account_name}] 缓存Cookie兜底异常: {e}")
 
