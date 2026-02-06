@@ -15,6 +15,7 @@ import json
 import os
 import ssl
 import tempfile
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -46,9 +47,119 @@ class PlatformManager:
         self.results: list[CheckinResult] = []
         # Cookie 缓存：OAuth 成功后自动保存，下次优先使用 Cookie+API（更快）
         self._cookie_cache = CookieCache()
+        # NEWAPI_ACCOUNTS 覆盖文件：Secrets 只读时，用文件缓存“最新可用 cookie”覆盖旧配置
+        self._newapi_override_file = os.getenv(
+            "NEWAPI_ACCOUNTS_OVERRIDE_FILE", ".newapi_accounts_override.json"
+        )
         # 缓存 LinuxDO 账户，用于浏览器回退登录
         self._linuxdo_accounts: list[dict] = []
         self._load_linuxdo_accounts()
+        self._apply_newapi_accounts_override()
+
+    def _load_newapi_accounts_override(self) -> dict:
+        """加载 NEWAPI 账号覆盖信息（用于覆盖 Secrets 中过期 cookie）。"""
+        try:
+            if not os.path.exists(self._newapi_override_file):
+                return {}
+            with open(self._newapi_override_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning(f"读取 NEWAPI 覆盖文件失败: {e}")
+            return {}
+
+    def _save_newapi_accounts_override(self, payload: dict) -> None:
+        """原子写入 NEWAPI 覆盖文件。"""
+        try:
+            target_dir = os.path.dirname(self._newapi_override_file) or "."
+            os.makedirs(target_dir, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", delete=False, dir=target_dir, encoding="utf-8"
+            ) as tmp:
+                json.dump(payload, tmp, ensure_ascii=False, indent=2)
+                tmp_path = tmp.name
+            os.replace(tmp_path, self._newapi_override_file)
+        except Exception as e:
+            logger.warning(f"写入 NEWAPI 覆盖文件失败: {e}")
+
+    @staticmethod
+    def _build_newapi_override_keys(provider: str, name: str | None, api_user: str | None) -> list[str]:
+        """生成账号覆盖匹配 key（按稳定性优先级）。"""
+        keys: list[str] = []
+        p = provider or ""
+        if name:
+            keys.append(f"{p}::name::{name}")
+        if api_user:
+            keys.append(f"{p}::api_user::{api_user}")
+        return keys
+
+    def _apply_newapi_accounts_override(self) -> None:
+        """启动时将覆盖文件中的新 cookie 应用到 NEWAPI_ACCOUNTS 内存配置。"""
+        if not self.config.anyrouter_accounts:
+            return
+
+        overrides = self._load_newapi_accounts_override()
+        if not overrides:
+            return
+
+        applied = 0
+        for idx, account in enumerate(self.config.anyrouter_accounts):
+            account_name = account.get_display_name(idx)
+            keys = self._build_newapi_override_keys(account.provider, account.name, account.api_user)
+            hit = None
+            for k in keys:
+                value = overrides.get(k)
+                if isinstance(value, dict) and value.get("cookies") and value.get("api_user"):
+                    hit = value
+                    break
+            if not hit:
+                continue
+
+            # 只在内存中覆盖；后续运行将优先使用这个新值
+            account.cookies = hit["cookies"]
+            account.api_user = hit["api_user"]
+            applied += 1
+
+            source = hit.get("source", "override")
+            updated_at = hit.get("updated_at", "")
+            logger.info(
+                f"[{account_name}] 应用账号覆盖Cookie（source={source}, updated_at={updated_at}）"
+            )
+
+        if applied:
+            logger.success(f"已应用 {applied} 个 NEWAPI 账号覆盖Cookie")
+
+    def _persist_newapi_account_override(
+        self,
+        account: AnyRouterAccount,
+        account_name: str,
+        provider_name: str,
+        session_cookie: str,
+        api_user: str,
+        source: str = "oauth_refresh",
+    ) -> None:
+        """将新 cookie 持久化为 NEWAPI 账号覆盖，供下次运行优先使用。"""
+        if not session_cookie or not api_user:
+            return
+
+        payload = self._load_newapi_accounts_override()
+        keys = self._build_newapi_override_keys(provider_name, account.name, account.api_user)
+        record = {
+            "provider": provider_name,
+            "name": account.name,
+            "api_user": api_user,
+            "cookies": {"session": session_cookie},
+            "source": source,
+            "updated_at": str(int(time.time())),
+        }
+        for key in keys:
+            payload[key] = record
+        self._save_newapi_accounts_override(payload)
+
+        # 同步更新当前内存对象，确保本次运行后续逻辑直接用新值
+        account.cookies = {"session": session_cookie}
+        account.api_user = api_user
+        logger.success(f"[{account_name}] 已覆盖 NEWAPI 账号Cookie，下次运行将优先使用新Cookie")
 
     def _load_linuxdo_accounts(self) -> None:
         """加载 LinuxDO 账户用于浏览器回退登录（不用于浏览帖子）"""
@@ -1297,41 +1408,7 @@ class PlatformManager:
                     continue
 
             logger.info(f"开始签到: {account_name} ({provider_name})")
-
-            # ===== 优先尝试缓存的 Cookie（OAuth 成功后自动保存的） =====
-            cached = self._cookie_cache.get(provider_name, account_name)
-            if cached:
-                logger.info(f"[{account_name}] 发现缓存Cookie，优先尝试Cookie+API方式...")
-                try:
-                    cached_account = AnyRouterAccount(
-                        cookies={"session": cached["session"]},
-                        api_user=cached["api_user"],
-                        provider=account.provider,
-                        name=account.name,
-                    )
-                    result = await self._checkin_newapi(cached_account, provider, account_name)
-
-                    if result.status == CheckinStatus.SUCCESS:
-                        # 缓存 Cookie 有效，签到成功
-                        result.message = f"{result.message} (缓存Cookie)"
-                        if result.details is None:
-                            result.details = {}
-                        result.details["login_method"] = "cached_cookie"
-                        results.append(result)
-                        logger.success(f"[{account_name}] 使用缓存Cookie签到成功！")
-                        continue
-
-                    # 检查是否是 Cookie 过期，需要清除缓存
-                    msg = result.message or ""
-                    if "401" in msg or "403" in msg or "过期" in msg:
-                        logger.warning(f"[{account_name}] 缓存Cookie已失效，清除缓存")
-                        self._cookie_cache.invalidate(provider_name, account_name)
-                    else:
-                        logger.warning(f"[{account_name}] 缓存Cookie签到失败: {msg}")
-                except Exception as e:
-                    logger.warning(f"[{account_name}] 使用缓存Cookie签到异常: {e}")
-                    self._cookie_cache.invalidate(provider_name, account_name)
-            # ===== 缓存检查结束 =====
+            logger.info(f"[{account_name}] 优先使用 NEWAPI_ACCOUNTS 当前Cookie尝试签到")
 
             # 检查是否需要直接使用浏览器 OAuth（某些站点有 Cloudflare 保护）
             if provider.bypass_method == "browser_oauth":
@@ -1352,6 +1429,29 @@ class PlatformManager:
                     msg = result.message or ""
                     if "401" in msg or "403" in msg or "过期" in msg:
                         logger.warning(f"[{account_name}] Cookie 失效，标记为需要浏览器回退")
+                        # NEWAPI_ACCOUNTS 当前 cookie 失败后，再尝试一次本地缓存 cookie（若存在）
+                        cached = self._cookie_cache.get(provider_name, account_name)
+                        if cached:
+                            logger.info(f"[{account_name}] 检测到缓存Cookie，作为二次兜底再尝试一次")
+                            try:
+                                cached_account = AnyRouterAccount(
+                                    cookies={"session": cached["session"]},
+                                    api_user=cached["api_user"],
+                                    provider=account.provider,
+                                    name=account.name,
+                                )
+                                cached_result = await self._checkin_newapi(cached_account, provider, account_name)
+                                if cached_result.status == CheckinStatus.SUCCESS:
+                                    cached_result.message = f"{cached_result.message} (缓存Cookie兜底)"
+                                    if cached_result.details is None:
+                                        cached_result.details = {}
+                                    cached_result.details["login_method"] = "cached_cookie_fallback"
+                                    results.append(cached_result)
+                                    logger.success(f"[{account_name}] 缓存Cookie兜底签到成功！")
+                                    continue
+                            except Exception as e:
+                                logger.warning(f"[{account_name}] 缓存Cookie兜底异常: {e}")
+
                         failed_accounts.append({
                             "account": account,
                             "provider": provider,
@@ -1436,6 +1536,15 @@ class PlatformManager:
                             )
                             logger.success(
                                 f"[{account_name}] 新Cookie已缓存，下次将优先使用Cookie+API方式"
+                            )
+                            # 同步覆盖 NEWAPI_ACCOUNTS（通过覆盖文件持久化）
+                            self._persist_newapi_account_override(
+                                account=account,
+                                account_name=account_name,
+                                provider_name=provider.name,
+                                session_cookie=cached_session,
+                                api_user=cached_api_user,
+                                source="oauth_refresh",
                             )
                 else:
                     logger.error(f"[{account_name}] 浏览器回退签到失败: {result.message}")

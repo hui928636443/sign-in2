@@ -53,7 +53,9 @@ jobs:
       - name: Restore cookie cache
         uses: actions/cache@v4
         with:
-          path: .newapi_cookies
+          path: |
+            .newapi_cookies
+            .newapi_accounts_override.json
           key: newapi-cookies-${{ github.run_id }}
           restore-keys: |
             newapi-cookies-
