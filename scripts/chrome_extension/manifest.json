@@ -11,22 +11,7 @@
     "tabs"
   ],
   "host_permissions": [
-    "*://*.linux.do/*",
-    "*://linux.do/*",
-    "*://*.wzw.pp.ua/*",
-    "*://*.h-e.top/*",
-    "*://*.kfc-api.sxxe.net/*",
-    "*://*.free.duckcoding.com/*",
-    "*://*.runanytime.hxi.me/*",
-    "*://*.ai.zzhdsgsss.xyz/*",
-    "*://*.api.mitchll.com/*",
-    "*://*.anyrouter.top/*",
-    "*://*.new-api-bxhm.onrender.com/*",
-    "*://*.aidrouter.qzz.io/*",
-    "*://*.lightllm.online/*",
-    "*://*.api.hotaruapi.top/*",
-    "*://*.api.dev88.tech/*",
-    "*://*.ai.huan666.de/*"
+    "<all_urls>"
   ],
   "action": {
     "default_popup": "popup.html",

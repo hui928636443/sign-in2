@@ -4,11 +4,16 @@
 
 目标流程：
 1. GitHub Action 跑完后，自动更新 `scripts/chrome_extension/failed_sites.json`
-2. 本地 `git pull`
-3. 打开扩展，点击“一键打开失败站点”
-4. 你在浏览器里人工登录这些站点
-5. 回到扩展，点击“提取失败站点 Cookie”
-6. 复制生成结果，粘贴到 GitHub Secret `NEWAPI_ACCOUNTS`
+2. 同时邮件附件会收到：
+   - `NEWAPI_ACCOUNTS.json`
+   - `failed_sites.json`
+3. 打开扩展：
+   - 可直接“刷新失败清单”读取本地 `failed_sites.json`
+   - 或点“导入邮件失败清单 JSON”导入邮件附件
+4. 点击“一键打开失败站点”
+5. 你在浏览器里人工登录这些站点
+6. 回到扩展，点击“提取失败站点 Cookie”
+7. 复制生成结果，粘贴到 GitHub Secret `NEWAPI_ACCOUNTS`
 
 ## 安装
 
@@ -22,6 +27,11 @@
 ### 1) 刷新失败清单
 - 扩展会读取本地目录中的 `failed_sites.json`
 - 如果提示读取失败，先确认仓库已 `pull` 到最新
+
+### 1.1) 导入邮件失败清单（可选）
+- 点击“导入邮件失败清单 JSON”
+- 选择邮件附件中的 `failed_sites.json`
+- 导入后会优先使用该清单；点击“刷新失败清单”可切回本地文件
 
 ### 2) 一键打开失败站点
 - 按失败清单批量打开登录页

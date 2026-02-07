@@ -1,8 +1,17 @@
 const FAILED_REPORT_PATH = "failed_sites.json";
+const STORAGE_KEYS = {
+  baseAccounts: "manual_patch_base_accounts",
+  resultAccounts: "manual_patch_result_accounts",
+  failedReportOverrideEnabled: "manual_patch_failed_report_override_enabled",
+  failedReportOverridePayload: "manual_patch_failed_report_override_payload",
+  failedReportOverrideFileName: "manual_patch_failed_report_override_file_name",
+};
 
 const statusEl = document.getElementById("status");
 const failedMetaEl = document.getElementById("failedMeta");
 const failedPreviewEl = document.getElementById("failedPreview");
+const importFailedBtn = document.getElementById("importFailedBtn");
+const failedFileInputEl = document.getElementById("failedFileInput");
 const baseAccountsEl = document.getElementById("baseAccounts");
 const resultJsonEl = document.getElementById("resultJson");
 const extractSummaryEl = document.getElementById("extractSummary");
@@ -16,6 +25,24 @@ let failedSites = [];
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function storageGet(keys) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(keys, resolve);
+  });
+}
+
+function storageSet(payload) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set(payload, resolve);
+  });
+}
+
+function storageRemove(keys) {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove(keys, resolve);
+  });
 }
 
 function safeJsonParse(text, fallback) {
@@ -42,6 +69,16 @@ function normalizeFailedSite(site) {
   };
 }
 
+function normalizeFailedReport(report, defaultSource = "unknown") {
+  const failed = Array.isArray(report?.failed_sites) ? report.failed_sites : [];
+  return {
+    generated_at: report?.generated_at || new Date().toISOString(),
+    source: String(report?.source || defaultSource),
+    failed_count: failed.length,
+    failed_sites: failed,
+  };
+}
+
 function parseDomainFromUrl(rawUrl) {
   try {
     return new URL(rawUrl).hostname;
@@ -62,11 +99,15 @@ function dedupeByKey(items, keyFn) {
 }
 
 function renderFailedSites(report) {
-  const sites = Array.isArray(report.failed_sites) ? report.failed_sites.map(normalizeFailedSite) : [];
+  const normalized = normalizeFailedReport(report);
+  const sites = normalized.failed_sites.map(normalizeFailedSite);
   failedSites = dedupeByKey(sites, (x) => `${x.provider}_${x.account_name}_${x.api_user}`);
 
-  const generatedAt = report.generated_at ? String(report.generated_at).replace("T", " ").slice(0, 19) : "未知";
-  failedMetaEl.textContent = `失败 ${failedSites.length} 个 | 生成时间 ${generatedAt}`;
+  const generatedAt = normalized.generated_at
+    ? String(normalized.generated_at).replace("T", " ").slice(0, 19)
+    : "未知";
+  const source = normalized.source ? ` | 来源 ${normalized.source}` : "";
+  failedMetaEl.textContent = `失败 ${failedSites.length} 个 | 生成时间 ${generatedAt}${source}`;
 
   if (!failedSites.length) {
     failedPreviewEl.textContent = "暂无失败站点";
@@ -88,8 +129,62 @@ async function loadFailedReport() {
   if (!response.ok) {
     throw new Error(`读取失败清单失败: HTTP ${response.status}`);
   }
-  const report = await response.json();
+  const report = normalizeFailedReport(await response.json(), "local");
   renderFailedSites(report);
+}
+
+async function importFailedReportFromFile(file) {
+  const raw = await file.text();
+  const parsed = safeJsonParse(raw, null);
+  if (!parsed || !Array.isArray(parsed.failed_sites)) {
+    throw new Error("导入失败：文件不是有效的 failed_sites.json 格式");
+  }
+
+  const report = normalizeFailedReport(parsed, "email_import");
+  renderFailedSites(report);
+
+  await storageSet({
+    [STORAGE_KEYS.failedReportOverrideEnabled]: true,
+    [STORAGE_KEYS.failedReportOverridePayload]: JSON.stringify(report),
+    [STORAGE_KEYS.failedReportOverrideFileName]: file.name,
+  });
+
+  setStatus(`已导入失败清单：${file.name}（${failedSites.length} 个）。`);
+}
+
+async function clearImportedFailedReport() {
+  await storageRemove([
+    STORAGE_KEYS.failedReportOverrideEnabled,
+    STORAGE_KEYS.failedReportOverridePayload,
+    STORAGE_KEYS.failedReportOverrideFileName,
+  ]);
+}
+
+async function restoreImportedFailedReport() {
+  const data = await storageGet([
+    STORAGE_KEYS.failedReportOverrideEnabled,
+    STORAGE_KEYS.failedReportOverridePayload,
+    STORAGE_KEYS.failedReportOverrideFileName,
+  ]);
+
+  if (!data[STORAGE_KEYS.failedReportOverrideEnabled]) {
+    return false;
+  }
+
+  const payload = String(data[STORAGE_KEYS.failedReportOverridePayload] || "").trim();
+  if (!payload) {
+    return false;
+  }
+
+  const parsed = safeJsonParse(payload, null);
+  if (!parsed || !Array.isArray(parsed.failed_sites)) {
+    return false;
+  }
+
+  renderFailedSites(normalizeFailedReport(parsed, "email_import"));
+  const fileName = String(data[STORAGE_KEYS.failedReportOverrideFileName] || "导入文件");
+  setStatus(`已加载导入失败清单：${fileName}。可点“刷新失败清单”切回本地文件。`);
+  return true;
 }
 
 function pickOpenUrl(site) {
@@ -244,9 +339,9 @@ async function extractFailedCookiesAndBuildSecret() {
   extractSummaryEl.textContent = lines.join("\n");
   setStatus(`完成：已生成 NEWAPI_ACCOUNTS（共 ${merged.length} 条）。`);
 
-  chrome.storage.local.set({
-    manual_patch_base_accounts: baseAccountsEl.value,
-    manual_patch_result_accounts: resultJsonEl.value,
+  await storageSet({
+    [STORAGE_KEYS.baseAccounts]: baseAccountsEl.value,
+    [STORAGE_KEYS.resultAccounts]: resultJsonEl.value,
   });
 }
 
@@ -261,23 +356,42 @@ async function copyResult() {
 }
 
 async function restoreDraft() {
-  const data = await new Promise((resolve) => {
-    chrome.storage.local.get(["manual_patch_base_accounts", "manual_patch_result_accounts"], resolve);
-  });
-  if (data.manual_patch_base_accounts) {
-    baseAccountsEl.value = data.manual_patch_base_accounts;
+  const data = await storageGet([STORAGE_KEYS.baseAccounts, STORAGE_KEYS.resultAccounts]);
+  if (data[STORAGE_KEYS.baseAccounts]) {
+    baseAccountsEl.value = data[STORAGE_KEYS.baseAccounts];
   }
-  if (data.manual_patch_result_accounts) {
-    resultJsonEl.value = data.manual_patch_result_accounts;
+  if (data[STORAGE_KEYS.resultAccounts]) {
+    resultJsonEl.value = data[STORAGE_KEYS.resultAccounts];
   }
 }
 
 refreshBtn.addEventListener("click", async () => {
   try {
     await loadFailedReport();
-    setStatus("失败清单刷新成功。");
+    await clearImportedFailedReport();
+    setStatus("失败清单刷新成功（已切回本地 failed_sites.json）。");
   } catch (e) {
     setStatus(e.message);
+  }
+});
+
+importFailedBtn.addEventListener("click", () => {
+  failedFileInputEl.value = "";
+  failedFileInputEl.click();
+});
+
+failedFileInputEl.addEventListener("change", async () => {
+  const file = failedFileInputEl.files?.[0];
+  if (!file) return;
+
+  importFailedBtn.disabled = true;
+  try {
+    await importFailedReportFromFile(file);
+  } catch (e) {
+    setStatus(e.message || "导入失败清单失败。");
+  } finally {
+    importFailedBtn.disabled = false;
+    failedFileInputEl.value = "";
   }
 });
 
@@ -300,6 +414,10 @@ copyBtn.addEventListener("click", async () => {
 
 (async function init() {
   await restoreDraft();
+  const restored = await restoreImportedFailedReport();
+  if (restored) {
+    return;
+  }
   try {
     await loadFailedReport();
     setStatus("已加载失败站点清单。按顺序：打开站点 -> 人工登录 -> 提取生成。 ");

@@ -163,11 +163,12 @@ async def run_checkin(args: argparse.Namespace) -> int:
         await manager.run_all()
 
     newapi_export_path: str | None = None
+    failed_sites_export_path: str | None = None
 
     # 导出失败站点给 Chrome 插件（用于本地一键打开失败站点补登录）
     if not args.platform or args.platform == "newapi":
         try:
-            manager.export_newapi_failed_sites_for_extension()
+            failed_sites_export_path = manager.export_newapi_failed_sites_for_extension()
         except Exception as e:
             logger.warning(f"导出失败站点清单失败: {e}")
         try:
@@ -182,7 +183,10 @@ async def run_checkin(args: argparse.Namespace) -> int:
     if not args.no_notify:
         manager.send_summary_notification(force=args.force_notify)
         if not args.platform or args.platform == "newapi":
-            manager.send_newapi_accounts_export_email(newapi_export_path)
+            manager.send_newapi_accounts_export_email(
+                newapi_export_path,
+                failed_sites_export_path,
+            )
 
     # 给异步子进程回收留一点缓冲，降低 interpreter 退出时 event loop 噪音
     await asyncio.sleep(0.2)

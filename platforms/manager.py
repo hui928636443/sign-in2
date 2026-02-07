@@ -998,6 +998,7 @@ class PlatformManager:
                 key in lowered_msg
                 for key in ("无法获取 session", "oauth 登录失败", "linuxdo 登录失败", "cloudflare", "验证失败")
             )
+            result_details = result.details if isinstance(result.details, dict) else {}
             failed_sites.append(
                 {
                     "provider": provider_name,
@@ -1008,6 +1009,9 @@ class PlatformManager:
                     "login_url": login_url,
                     "oauth_login_url": oauth_url,
                     "reason": message,
+                    "failure_kind": result_details.get("failure_kind", ""),
+                    "runtime_cookie_keys": result_details.get("runtime_cookie_keys", []),
+                    "last_url": result_details.get("last_url", ""),
                     "needs_manual_auth": True,
                     "oauth_cookie_blocked": oauth_blocked,
                 }
@@ -1172,31 +1176,54 @@ class PlatformManager:
         )
         return target_path
 
-    def send_newapi_accounts_export_email(self, export_path: str | None) -> None:
-        """可选：发送 NEWAPI 导出文件附件邮件。"""
-        if not export_path:
-            return
+    def send_newapi_accounts_export_email(
+        self,
+        export_path: str | None,
+        failed_sites_path: str | None = None,
+    ) -> None:
+        """可选：发送 NEWAPI 导出附件邮件（账号快照 + 失败站点清单）。"""
         if not self._env_bool("NEWAPI_EXPORT_EMAIL_ENABLED", False):
             logger.info("NEWAPI 导出附件邮件未启用（NEWAPI_EXPORT_EMAIL_ENABLED=false）")
             return
-        if not os.path.exists(export_path):
-            logger.warning(f"NEWAPI 导出附件不存在，跳过邮件发送: {export_path}")
+
+        attachments: list[str] = []
+
+        if export_path:
+            if os.path.exists(export_path):
+                attachments.append(export_path)
+            else:
+                logger.warning(f"NEWAPI 导出附件不存在，已跳过: {export_path}")
+
+        if failed_sites_path:
+            if os.path.exists(failed_sites_path):
+                attachments.append(failed_sites_path)
+            else:
+                logger.warning(f"失败站点附件不存在，已跳过: {failed_sites_path}")
+
+        if not attachments:
+            logger.warning("NEWAPI 导出附件邮件未发送：没有可用附件")
             return
 
         title = os.getenv(
             "NEWAPI_EXPORT_EMAIL_SUBJECT",
             f"NEWAPI_ACCOUNTS 导出 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         )
-        content = (
-            "本次 NewAPI 运行已生成最新账号快照，请下载附件中的 NEWAPI_ACCOUNTS.json "
-            "并按需更新到仓库 Secret。"
-        )
+        content_lines = ["本次 NewAPI 运行已生成附件文件："]
+        if export_path and export_path in attachments:
+            content_lines.append(
+                f"- {os.path.basename(export_path)}：运行后账号快照，可按需更新到仓库 Secret。"
+            )
+        if failed_sites_path and failed_sites_path in attachments:
+            content_lines.append(
+                f"- {os.path.basename(failed_sites_path)}：失败站点清单，可在插件中导入后一键打开站点进行人工登录补录。"
+            )
+        content = "\n".join(content_lines)
 
         with self.notify:
             self.notify.send_email_with_attachments(
                 title=title,
                 content=content,
-                attachments=[export_path],
+                attachments=attachments,
                 msg_type="text",
             )
 
@@ -1650,12 +1677,16 @@ class PlatformManager:
                 # 直接在共享 tab 上做 OAuth（跳过 LinuxDO 登录，已经登录了）
                 session_cookie, api_user = await checker._oauth_login_and_get_session(tab)
 
-                if not session_cookie or not api_user:
+                if not session_cookie:
                     return CheckinResult(
                         platform=f"NewAPI ({provider_name})",
                         account=account_name,
                         status=CheckinStatus.FAILED,
                         message="OAuth 登录失败，无法获取 session",
+                        details={
+                            "failure_kind": "session_missing",
+                            "runtime_cookie_keys": sorted(list(checker.get_runtime_cookies().keys())),
+                        },
                     )
 
                 # 用获取到的 session 签到
@@ -1669,7 +1700,7 @@ class PlatformManager:
 
                 details["login_method"] = "shared_oauth"
                 details["_cached_session"] = session_cookie
-                details["_cached_api_user"] = api_user
+                details["_cached_api_user"] = (api_user or details.get("resolved_api_user") or "")
                 details["_cached_cookies"] = runtime_cookies or {"session": session_cookie}
 
                 return CheckinResult(
