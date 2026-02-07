@@ -111,10 +111,12 @@
     </div>
     
     <div class="btn-row">
+      <button id="importFilesBtn" class="btn" style="background: #2b6cb0;">📂 导入 JSON 文件</button>
       <button id="mergeBtn" class="btn btn-primary">🔀 合并去重</button>
       <button id="copyBtn" class="btn btn-success">📋 复制结果</button>
       <button id="clearBtn" class="btn" style="background: #4a5568;">🗑️ 清空</button>
     </div>
+    <input id="fileInput" type="file" accept=".json,application/json" multiple hidden />
     
     <div class="section output-section">
       <div class="section-title">📤 输出区（合并后的配置）</div>

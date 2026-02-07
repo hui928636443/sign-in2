@@ -1,6 +1,8 @@
 // DOM 元素
 const inputText = document.getElementById("inputText");
 const outputText = document.getElementById("outputText");
+const importFilesBtn = document.getElementById("importFilesBtn");
+const fileInput = document.getElementById("fileInput");
 const mergeBtn = document.getElementById("mergeBtn");
 const copyBtn = document.getElementById("copyBtn");
 const clearBtn = document.getElementById("clearBtn");
@@ -75,6 +77,54 @@ function mergeConfigs(allConfigs) {
   result.sort((a, b) => a.provider.localeCompare(b.provider));
   
   return result;
+}
+
+function appendBlocksToInput(blocks) {
+  if (!blocks.length) return;
+  const existing = inputText.value.trim();
+  const incoming = blocks.join("\n\n");
+  inputText.value = existing ? `${existing}\n\n${incoming}` : incoming;
+}
+
+async function importJsonFiles(files) {
+  const allFiles = Array.from(files || []);
+  if (!allFiles.length) {
+    setStatus("⚠️ 未选择文件", "error");
+    return;
+  }
+
+  const blocks = [];
+  const errors = [];
+  let validFiles = 0;
+  let itemCount = 0;
+
+  for (const file of allFiles) {
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw.trim());
+      if (!Array.isArray(parsed)) {
+        errors.push(`${file.name}: 不是 JSON 数组`);
+        continue;
+      }
+      validFiles += 1;
+      itemCount += parsed.length;
+      blocks.push(JSON.stringify(parsed, null, 2));
+    } catch (e) {
+      errors.push(`${file.name}: JSON 解析失败`);
+    }
+  }
+
+  if (!validFiles) {
+    setStatus(`❌ 导入失败：${errors.join(" | ")}`, "error");
+    return;
+  }
+
+  appendBlocksToInput(blocks);
+  let msg = `✅ 已导入 ${validFiles}/${allFiles.length} 个文件，累计 ${itemCount} 条记录到输入区`;
+  if (errors.length) {
+    msg += `（忽略 ${errors.length} 个无效文件）`;
+  }
+  setStatus(msg, "success");
 }
 
 // 执行合并
@@ -152,6 +202,21 @@ function clearAll() {
 }
 
 // 事件绑定
+importFilesBtn.addEventListener("click", () => {
+  fileInput.value = "";
+  fileInput.click();
+});
+
+fileInput.addEventListener("change", async (e) => {
+  importFilesBtn.disabled = true;
+  try {
+    await importJsonFiles(e.target.files);
+  } finally {
+    importFilesBtn.disabled = false;
+    fileInput.value = "";
+  }
+});
+
 mergeBtn.addEventListener("click", doMerge);
 copyBtn.addEventListener("click", copyResult);
 clearBtn.addEventListener("click", clearAll);
