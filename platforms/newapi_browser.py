@@ -72,6 +72,7 @@ class NewAPIBrowserCheckin:
         self._browser_manager: BrowserManager | None = None
         self._session_cookie: str | None = None
         self._api_user: str | None = None
+        self._runtime_cookies: dict[str, str] = {}
         self._login_method: str = "unknown"
 
         # Debug 模式
@@ -125,7 +126,68 @@ class NewAPIBrowserCheckin:
         except Exception as e:
             logger.debug(f"[{self._account_name}] [{context}] 获取页面信息失败: {e}")
 
-    async def _checkin_with_cookies(self, session_cookie: str, api_user: str) -> tuple[bool, str, dict]:
+    async def _safe_evaluate(self, tab, script: str, *, timeout: int = 10, label: str = "evaluate", default=None):
+        """带超时保护的 evaluate，避免单次 evaluate 卡死整个 OAuth 流程。"""
+        try:
+            return await asyncio.wait_for(tab.evaluate(script), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"[{self.account_name}] {label} 超时({timeout}s)，已跳过")
+            return default
+        except Exception as e:
+            logger.debug(f"[{self.account_name}] {label} 失败: {e}")
+            return default
+
+    async def _safe_get(self, tab, url: str, *, timeout: int = 45, label: str = "navigate") -> bool:
+        """带超时保护的页面跳转。"""
+        try:
+            await asyncio.wait_for(tab.get(url), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"[{self.account_name}] {label} 超时({timeout}s): {url}")
+            return False
+        except Exception as e:
+            logger.warning(f"[{self.account_name}] {label} 失败: {e}")
+            return False
+
+    async def _is_provider_logged_in_dom(self, tab) -> bool:
+        """通过 DOM 判断站点是否已登录（用于 URL 仍停在 /login 的 SPA 场景）。"""
+        result = await self._safe_evaluate(
+            tab,
+            r"""
+            (function() {
+                const text = (document.body && document.body.innerText ? document.body.innerText : '').toLowerCase();
+                const hasLoginInput = !!document.querySelector(
+                    'input[type="password"], input[name="password"], input[placeholder*="Password"], input[placeholder*="密码"]'
+                );
+                const hasUserMenu = !!document.querySelector(
+                    '.semi-avatar, .user-avatar, [class*="user-menu"], [class*="profile"]'
+                );
+                const hasConsoleHints = (
+                    text.includes('dashboard') ||
+                    text.includes('token manage') ||
+                    text.includes('token management') ||
+                    text.includes('wallet') ||
+                    text.includes('console')
+                );
+                return !hasLoginInput && (hasUserMenu || hasConsoleHints);
+            })()
+            """,
+            timeout=8,
+            label="detect_logged_in_dom",
+            default=False,
+        )
+        return bool(result)
+
+    def get_runtime_cookies(self) -> dict[str, str]:
+        """获取本轮 OAuth 收集到的 cookie（用于立即签到/缓存）。"""
+        return dict(self._runtime_cookies)
+
+    async def _checkin_with_cookies(
+        self,
+        session_cookie: str,
+        api_user: str,
+        extra_cookies: dict | None = None,
+    ) -> tuple[bool, str, dict]:
         """使用 Cookie 方式签到（HTTP 请求）"""
         details = {}
         headers = {
@@ -134,7 +196,17 @@ class NewAPIBrowserCheckin:
             "Content-Type": "application/json",
             self.provider.api_user_key: api_user,
         }
-        cookies = {"session": session_cookie}
+        cookies: dict[str, str] = {}
+        if isinstance(extra_cookies, dict):
+            cookies.update(
+                {
+                    str(k): str(v)
+                    for k, v in extra_cookies.items()
+                    if k and v is not None and str(v).strip()
+                }
+            )
+        cookies["session"] = session_cookie
+        details["cookie_names"] = sorted(list(cookies.keys()))
 
         try:
             async with httpx.AsyncClient(timeout=30.0, cookies=cookies) as client:
@@ -241,6 +313,8 @@ class NewAPIBrowserCheckin:
         max_turnstile_clicks = 5
         # 先等一小段时间让非交互式挑战自动完成
         initial_wait_done = False
+        # 某些页面会残留隐藏的 cf DOM（并非真实挑战），避免因此误判卡死
+        stable_non_cf_rounds = 0
 
         while asyncio.get_event_loop().time() - start_time < timeout:
             try:
@@ -258,13 +332,6 @@ class NewAPIBrowserCheckin:
                 is_cf_title = any(ind in title_lower for ind in cf_indicators)
                 is_cf_url = "/cdn-cgi/challenge" in current_url_lower or "challenges.cloudflare.com" in current_url_lower
 
-                # 经验：标题已经回到 LinuxDO 正常页时，优先判定通过，避免误判卡死。
-                # 这里不依赖宽泛文本匹配，避免把普通正文误判成挑战页。
-                if "linux do" in title_lower and not is_cf_title and not is_cf_url:
-                    logger.success(f"[{self.account_name}] Cloudflare 验证通过！")
-                    await self._save_debug_screenshot(tab, "cf_passed")
-                    return True
-
                 # 检测 Turnstile iframe 或容器是否存在（DOM 匹配）
                 has_cf_element = await tab.evaluate(r"""
                     (function() {
@@ -272,20 +339,60 @@ class NewAPIBrowserCheckin:
                         const iframes = document.querySelectorAll('iframe');
                         for (const iframe of iframes) {
                             const src = (iframe.src || '').toLowerCase();
-                            if (src.includes('cloudflare') || src.includes('challenges.cloudflare.com')) return true;
+                            if (!(src.includes('cloudflare') || src.includes('challenges.cloudflare.com'))) {
+                                continue;
+                            }
+                            const rect = iframe.getBoundingClientRect();
+                            const visible = rect.width > 0 && rect.height > 0;
+                            if (visible) return true;
                         }
-                        // 方法2: 查找 Cloudflare 挑战容器（仅精确 selector，避免过度匹配正文文本）
-                        return !!document.querySelector(
-                            '.cf-turnstile, [name=\"cf-turnstile-response\"], #cf-turnstile, #challenge-running, #challenge-stage, #cf-wrapper'
-                        );
+                        // 方法2: 查找可见的 Cloudflare 挑战容器
+                        const selectors = [
+                            '.cf-turnstile',
+                            '#cf-turnstile',
+                            '#challenge-running',
+                            '#challenge-stage',
+                            '#cf-wrapper'
+                        ];
+                        for (const sel of selectors) {
+                            const el = document.querySelector(sel);
+                            if (!el) continue;
+                            const rect = el.getBoundingClientRect();
+                            const style = window.getComputedStyle(el);
+                            const visible = (
+                                rect.width > 0 &&
+                                rect.height > 0 &&
+                                style.display !== 'none' &&
+                                style.visibility !== 'hidden' &&
+                                Number(style.opacity || '1') > 0
+                            );
+                            if (visible) return true;
+                        }
+                        return false;
                     })()
                 """)
 
+                # 若标题/URL 已不是挑战态，即便有残留 cf DOM，也允许稳定后通过
+                if not is_cf_title and not is_cf_url and title:
+                    stable_non_cf_rounds += 1
+                else:
+                    stable_non_cf_rounds = 0
+
                 is_cf_page = is_cf_title or is_cf_url or has_cf_element
 
+                # 常见成功态：完全没有挑战信号
                 if not is_cf_page and title:
                     logger.success(f"[{self.account_name}] Cloudflare 验证通过！")
                     await self._save_debug_screenshot(tab, "cf_passed")
+                    return True
+
+                # 兜底成功态：仅残留 cf DOM，但标题/URL 连续稳定为非挑战态
+                if has_cf_element and stable_non_cf_rounds >= 4:
+                    logger.info(
+                        f"[{self.account_name}] 检测到残留 Cloudflare DOM，"
+                        "标题/URL 连续稳定，按验证通过处理"
+                    )
+                    await self._save_debug_screenshot(tab, "cf_passed_residual_dom")
                     return True
 
                 # 前 3 秒只等待，不点击（让非交互式挑战自动完成）
@@ -677,7 +784,8 @@ class NewAPIBrowserCheckin:
         if oauth_path:
             oauth_url = f"{self.provider.domain}{oauth_path}"
             logger.info(f"[{self.account_name}] 直接 OAuth 导航: {oauth_url}")
-            await tab.get(oauth_url)
+            if not await self._safe_get(tab, oauth_url, timeout=45, label="direct_oauth_navigate"):
+                return None, None
             await asyncio.sleep(5)
 
             # 检查是否到了授权页或已自动回来
@@ -720,15 +828,19 @@ class NewAPIBrowserCheckin:
         login_url = f"{self.provider.domain}{self.provider.login_path}"
         logger.info(f"[{self.account_name}] 访问站点登录页: {login_url}")
 
-        await tab.get(login_url)
+        if not await self._safe_get(tab, login_url, timeout=45, label="provider_login_navigate"):
+            return None, None
         await asyncio.sleep(5)
         await self._log_page_info(tab, "provider_login_page")
         await self._save_debug_screenshot(tab, "provider_login_page")
-        await self._wait_for_cloudflare_with_retry(tab)
+        cf_ok = await self._wait_for_cloudflare_with_retry(tab)
+        if not cf_ok:
+            return None, None
 
         # 检查是否已经登录
         current_url = tab.target.url if hasattr(tab, "target") else ""
-        if self.provider.domain in current_url and "login" not in current_url.lower():
+        dom_logged_in = await self._is_provider_logged_in_dom(tab)
+        if (self.provider.domain in current_url and "login" not in current_url.lower()) or dom_logged_in:
             logger.success(f"[{self.account_name}] 已登录，直接获取 session")
             await self._save_debug_screenshot(tab, "already_logged_in")
             return await self._extract_session_from_browser(tab)
@@ -739,11 +851,17 @@ class NewAPIBrowserCheckin:
         # Debug 模式：打印页面上所有可点击元素帮助调试
         if self._debug:
             try:
-                page_text = await tab.evaluate("document.body.innerText.substring(0, 500)")
+                page_text = await self._safe_evaluate(
+                    tab,
+                    "document.body && document.body.innerText ? document.body.innerText.substring(0, 500) : ''",
+                    timeout=8,
+                    label="debug_page_text",
+                    default="",
+                )
                 logger.debug(f"[{self.account_name}] 页面内容: {page_text[:200]}...")
 
                 # 列出所有可能的登录按钮
-                buttons_info = await tab.evaluate("""
+                buttons_info = await self._safe_evaluate(tab, """
                     (function() {
                         const results = [];
                         const elements = document.querySelectorAll('button, a, [role="button"], [onclick]');
@@ -761,7 +879,7 @@ class NewAPIBrowserCheckin:
                         }
                         return JSON.stringify(results.slice(0, 20));
                     })()
-                """)
+                """, timeout=10, label="debug_buttons_info", default="[]")
                 logger.debug(f"[{self.account_name}] 页面按钮列表: {buttons_info}")
             except Exception as e:
                 logger.debug(f"[{self.account_name}] 获取页面信息失败: {e}")
@@ -844,7 +962,7 @@ class NewAPIBrowserCheckin:
         for attempt in range(10):
             try:
                 # 返回按钮位置 [x, y, w, h, description]，用于 mouse_click
-                btn_rect = await tab.evaluate(r"""
+                btn_rect = await self._safe_evaluate(tab, r"""
                     (function() {
                         function getRect(el, desc) {
                             const rect = el.getBoundingClientRect();
@@ -913,7 +1031,7 @@ class NewAPIBrowserCheckin:
 
                         return null;
                     })()
-                """)
+                """, timeout=8, label=f"find_oauth_button_attempt_{attempt+1}", default=None)
 
                 if btn_rect and isinstance(btn_rect, (list, tuple)) and len(btn_rect) >= 4:
                     x = self._to_float(btn_rect[0])
@@ -943,14 +1061,15 @@ class NewAPIBrowserCheckin:
             # 登录页没找到 OAuth 按钮，尝试注册页（不对已配 oauth_path 的站点走注册页）
             register_url = f"{self.provider.domain}/register"
             logger.info(f"[{self.account_name}] 登录页未找到 OAuth 按钮，尝试注册页: {register_url}")
-            await tab.get(register_url)
+            if not await self._safe_get(tab, register_url, timeout=45, label="provider_register_navigate"):
+                return None, None
             await asyncio.sleep(3)
             await self._save_debug_screenshot(tab, "register_page")
 
             # 在注册页重新查找 OAuth 按钮（同样用 mouse_click）
             for attempt in range(3):
                 try:
-                    btn_rect = await tab.evaluate(r"""
+                    btn_rect = await self._safe_evaluate(tab, r"""
                         (function() {
                             function getRect(el, desc) {
                                 const rect = el.getBoundingClientRect();
@@ -987,7 +1106,7 @@ class NewAPIBrowserCheckin:
                             }
                             return null;
                         })()
-                    """)
+                    """, timeout=8, label=f"find_register_oauth_button_attempt_{attempt+1}", default=None)
                     if btn_rect and isinstance(btn_rect, (list, tuple)) and len(btn_rect) >= 4:
                         x = self._to_float(btn_rect[0])
                         y = self._to_float(btn_rect[1])
@@ -1048,7 +1167,7 @@ class NewAPIBrowserCheckin:
                 # Debug: 打印页面上所有按钮
                 if self._debug:
                     try:
-                        buttons_info = await tab.evaluate("""
+                        buttons_info = await self._safe_evaluate(tab, """
                             (function() {
                                 const results = [];
                                 const buttons = document.querySelectorAll('button, a, input[type="submit"], [role="button"]');
@@ -1061,7 +1180,7 @@ class NewAPIBrowserCheckin:
                                 }
                                 return JSON.stringify(results);
                             })()
-                        """)
+                        """, timeout=8, label="debug_oauth_authorize_buttons", default="[]")
                         logger.debug(f"[{self.account_name}] 授权页面按钮: {buttons_info}")
                     except Exception as e:
                         logger.debug(f"[{self.account_name}] 获取按钮信息失败: {e}")
@@ -1070,7 +1189,7 @@ class NewAPIBrowserCheckin:
                     # 三种方式尝试点击"允许"按钮
                     # 策略1: JS click + 直接导航 href（最可靠）
                     # 策略2: mouse_click 物理点击（备选）
-                    click_result = await tab.evaluate(r"""
+                    click_result = await self._safe_evaluate(tab, r"""
                         (function() {
                             const elements = document.querySelectorAll('a, button, input[type="submit"], [role="button"]');
 
@@ -1119,7 +1238,7 @@ class NewAPIBrowserCheckin:
 
                             return ['clicked', text, ''];
                         })()
-                    """)
+                    """, timeout=8, label="click_oauth_authorize", default=None)
                     if click_result and isinstance(click_result, (list, tuple)):
                         action = click_result[0] if len(click_result) > 0 else '?'
                         text = click_result[1] if len(click_result) > 1 else '?'
@@ -1151,7 +1270,8 @@ class NewAPIBrowserCheckin:
 
             await asyncio.sleep(1)
             if i % 5 == 0 and i > 0:
-                logger.debug(f"[{self.account_name}] 等待 OAuth 完成... ({i}s)")
+                current_url = tab.target.url if hasattr(tab, "target") else ""
+                logger.debug(f"[{self.account_name}] 等待 OAuth 完成... ({i}s, url={current_url})")
                 if self._debug:
                     await self._save_debug_screenshot(tab, f"oauth_waiting_{i}s")
 
@@ -1163,6 +1283,7 @@ class NewAPIBrowserCheckin:
         """从浏览器提取 session 和 api_user"""
         session_cookie = None
         api_user = None
+        runtime_cookies: dict[str, str] = {}
 
         # 提取 provider 域名用于过滤 cookie
         provider_domain = self.provider.domain.replace("https://", "").replace("http://", "")
@@ -1175,7 +1296,7 @@ class NewAPIBrowserCheckin:
             logger.info(f"[{self.account_name}] 当前 URL: {current_url}")
             if provider_domain not in current_url:
                 logger.info(f"[{self.account_name}] 导航到站点主页确保 session 设置...")
-                await tab.get(self.provider.domain)
+                await self._safe_get(tab, self.provider.domain, timeout=45, label="ensure_provider_home")
                 await asyncio.sleep(3)
 
             # 先尝试从 JS document.cookie 获取（最直接）
@@ -1219,6 +1340,8 @@ class NewAPIBrowserCheckin:
                     # 匹配 provider 域名（包括子域名）
                     if provider_domain not in cookie_domain and cookie_domain.lstrip(".") not in provider_domain:
                         continue
+                    if cookie.name and cookie.value:
+                        runtime_cookies[str(cookie.name)] = str(cookie.value)
                     if cookie.name in session_cookie_names and cookie.value:
                         session_cookie = cookie.value
                         logger.info(f"[{self.account_name}] 获取到 session ({cookie.name}): {session_cookie[:30]}...")
@@ -1243,7 +1366,8 @@ class NewAPIBrowserCheckin:
                     try:
                         oauth_url = f"{self.provider.domain}{oauth_path}"
                         logger.info(f"[{self.account_name}] 尝试直接访问: {oauth_url}")
-                        await tab.get(oauth_url)
+                        if not await self._safe_get(tab, oauth_url, timeout=45, label="direct_oauth_retry"):
+                            continue
                         await asyncio.sleep(5)
 
                         # 检查是否到了 LinuxDO 授权页（自动同意）
@@ -1270,6 +1394,8 @@ class NewAPIBrowserCheckin:
                             cookie_domain = cookie.domain or ""
                             if provider_domain not in cookie_domain and cookie_domain.lstrip(".") not in provider_domain:
                                 continue
+                            if cookie.name and cookie.value:
+                                runtime_cookies[str(cookie.name)] = str(cookie.value)
                             if cookie.name == "session" and cookie.value:
                                 session_cookie = cookie.value
                                 logger.success(f"[{self.account_name}] 直接 OAuth 登录获取到 session: {session_cookie[:30]}...")
@@ -1283,7 +1409,7 @@ class NewAPIBrowserCheckin:
             # 如果没有从 cookie 获取到 api_user，尝试从 localStorage 获取
             if not api_user:
                 # NewAPI 将用户信息存储在 localStorage 的 'user' 键中
-                api_user = await tab.evaluate("""
+                api_user = await self._safe_evaluate(tab, """
                     (function() {
                         // 尝试从 localStorage 的 user 对象获取 id
                         try {
@@ -1305,7 +1431,7 @@ class NewAPIBrowserCheckin:
 
                         return null;
                     })()
-                """)
+                """, timeout=8, label="read_api_user_local_storage", default=None)
                 if api_user:
                     logger.info(f"[{self.account_name}] 从 localStorage 获取到 api_user: {api_user}")
 
@@ -1313,7 +1439,7 @@ class NewAPIBrowserCheckin:
             if not api_user and session_cookie:
                 logger.info(f"[{self.account_name}] 尝试通过 API 获取用户信息...")
                 try:
-                    user_info = await tab.evaluate(f"""
+                    user_info = await self._safe_evaluate(tab, f"""
                         (async function() {{
                             try {{
                                 const resp = await fetch('{self.provider.domain}/api/user/self', {{
@@ -1326,7 +1452,7 @@ class NewAPIBrowserCheckin:
                             }} catch (e) {{}}
                             return null;
                         }})()
-                    """)
+                    """, timeout=12, label="fetch_api_user_from_self_api", default=None)
                     if user_info:
                         api_user = user_info
                         logger.info(f"[{self.account_name}] 从 API 获取到 api_user: {api_user}")
@@ -1335,6 +1461,14 @@ class NewAPIBrowserCheckin:
 
         except Exception as e:
             logger.error(f"[{self.account_name}] 提取 session 失败: {e}")
+
+        if session_cookie:
+            runtime_cookies["session"] = session_cookie
+        self._runtime_cookies = runtime_cookies
+        if self._runtime_cookies:
+            logger.info(
+                f"[{self.account_name}] 运行时 cookies 已收集: {sorted(self._runtime_cookies.keys())[:12]}"
+            )
 
         return session_cookie, api_user
 
@@ -1346,7 +1480,11 @@ class NewAPIBrowserCheckin:
                 session_cookie = self._preset_cookies.get("session")
                 if session_cookie:
                     logger.info(f"[{self.account_name}] 尝试使用预设 Cookie 签到...")
-                    success, message, details = await self._checkin_with_cookies(session_cookie, self._preset_api_user)
+                    success, message, details = await self._checkin_with_cookies(
+                        session_cookie,
+                        self._preset_api_user,
+                        extra_cookies=self._preset_cookies,
+                    )
 
                     if success:
                         self._login_method = "cookie"
@@ -1421,7 +1559,12 @@ class NewAPIBrowserCheckin:
 
             # 3. 使用新获取的 session 签到
             logger.info(f"[{self.account_name}] 使用新 session 签到...")
-            success, message, details = await self._checkin_with_cookies(session_cookie, api_user)
+            runtime_cookies = self.get_runtime_cookies()
+            success, message, details = await self._checkin_with_cookies(
+                session_cookie,
+                api_user,
+                extra_cookies=runtime_cookies,
+            )
 
             self._login_method = "oauth"
             details["login_method"] = "oauth"
@@ -1430,6 +1573,7 @@ class NewAPIBrowserCheckin:
             # 存储完整凭据，供 manager 提取并缓存（下次可直接用 Cookie+API）
             details["_cached_session"] = session_cookie
             details["_cached_api_user"] = api_user
+            details["_cached_cookies"] = runtime_cookies or {"session": session_cookie}
 
             return CheckinResult(
                 platform=f"NewAPI ({self.provider_name})",

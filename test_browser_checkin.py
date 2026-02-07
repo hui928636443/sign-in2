@@ -25,7 +25,7 @@ from platforms.newapi_browser import browser_checkin_newapi, load_linuxdo_accoun
 # 测试配置
 TEST_PROVIDER = "elysiver"  # 要签到的站点：hotaru, lightllm, anyrouter, techstar, elysiver 等
 
-# 从 签到账户newAPI.json 中获取 hotaru 的 cookie 和 api_user（可选）
+# 从 NEWAPI_ACCOUNTS.json 中获取 hotaru 的 cookie 和 api_user（可选）
 # 使用无效 cookie 测试 OAuth 回退
 # 对于 elysiver，直接使用 OAuth（因为有 Cloudflare 保护）
 TEST_COOKIES = None  # 不使用 Cookie，直接 OAuth

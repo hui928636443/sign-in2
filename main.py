@@ -15,6 +15,7 @@ Requirements:
 
 import argparse
 import asyncio
+import gc
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -161,12 +162,18 @@ async def run_checkin(args: argparse.Namespace) -> int:
     else:
         await manager.run_all()
 
+    newapi_export_path: str | None = None
+
     # 导出失败站点给 Chrome 插件（用于本地一键打开失败站点补登录）
     if not args.platform or args.platform == "newapi":
         try:
             manager.export_newapi_failed_sites_for_extension()
         except Exception as e:
             logger.warning(f"导出失败站点清单失败: {e}")
+        try:
+            newapi_export_path = manager.export_newapi_accounts_for_sync()
+        except Exception as e:
+            logger.warning(f"导出 NEWAPI_ACCOUNTS 失败: {e}")
 
     # 显示结果
     logger.info(f"签到完成 - 成功: {manager.success_count}, 失败: {manager.failed_count}, 跳过: {manager.skipped_count}")
@@ -174,6 +181,12 @@ async def run_checkin(args: argparse.Namespace) -> int:
     # 发送通知
     if not args.no_notify:
         manager.send_summary_notification(force=args.force_notify)
+        if not args.platform or args.platform == "newapi":
+            manager.send_newapi_accounts_export_email(newapi_export_path)
+
+    # 给异步子进程回收留一点缓冲，降低 interpreter 退出时 event loop 噪音
+    await asyncio.sleep(0.2)
+    gc.collect()
 
     return manager.get_exit_code()
 

@@ -13,6 +13,8 @@ GitHub Actions 环境需要配合 Xvfb 虚拟显示使用。
 
 import asyncio
 import contextlib
+import gc
+import inspect
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -819,9 +821,7 @@ class BrowserManager:
                 f"环境信息:\n{env_info}"
             )
             # 清理已启动的浏览器
-            if self._nodriver_browser:
-                with contextlib.suppress(Exception):
-                    self._nodriver_browser.stop()
+            await self._stop_nodriver_browser()
             raise BrowserStartupError(
                 message=f"获取初始标签页失败: {e}",
                 environment_info=env_info,
@@ -1219,19 +1219,32 @@ class BrowserManager:
 
     async def _cleanup_nodriver(self):
         """清理 nodriver 相关资源（用于重试前的清理）"""
-        with contextlib.suppress(Exception):
-            if self._nodriver_browser:
-                self._nodriver_browser.stop()
-                self._nodriver_browser = None
-        with contextlib.suppress(Exception):
-            self._nodriver_tab = None
+        await self._stop_nodriver_browser()
+
+    async def _stop_nodriver_browser(self):
+        """安全停止 nodriver，尽量避免事件循环关闭后的子进程回收噪音。"""
+        browser = self._nodriver_browser
+        self._nodriver_browser = None
+        self._nodriver_tab = None
+        if not browser:
+            return
+
+        try:
+            stop_ret = browser.stop()
+            if inspect.isawaitable(stop_ret):
+                await asyncio.wait_for(stop_ret, timeout=8)
+        except Exception as e:
+            logger.debug(f"停止 nodriver 失败（可忽略）: {e}")
+        finally:
+            # 让底层 pipe 回收在当前 loop 内完成，减少 'Event loop is closed' 噪音
+            await asyncio.sleep(0.2)
+            with contextlib.suppress(Exception):
+                gc.collect()
 
     async def close(self):
         """关闭浏览器"""
         if self.engine == "nodriver":
-            with contextlib.suppress(Exception):
-                if self._nodriver_browser:
-                    self._nodriver_browser.stop()
+            await self._stop_nodriver_browser()
         elif self.engine == "drissionpage":
             with contextlib.suppress(Exception):
                 if self._drission_page:

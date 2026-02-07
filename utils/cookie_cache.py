@@ -69,6 +69,17 @@ class CookieCache:
                 path.unlink(missing_ok=True)
                 return None
 
+            # 兼容扩展字段：cookies（完整 cookie bundle）
+            cookies = data.get("cookies")
+            if isinstance(cookies, dict):
+                # 确保 session 与顶层字段一致
+                cookies = {str(k): str(v) for k, v in cookies.items() if k and v}
+                if "session" not in cookies and data.get("session"):
+                    cookies["session"] = str(data["session"])
+                data["cookies"] = cookies
+            else:
+                data["cookies"] = {"session": str(data["session"])}
+
             logger.debug(
                 f"[CookieCache] 命中缓存({age_days:.1f}天): {provider}/{account_name}"
             )
@@ -79,15 +90,33 @@ class CookieCache:
             path.unlink(missing_ok=True)
             return None
 
-    def save(self, provider: str, account_name: str, session: str, api_user: str) -> None:
-        """保存 Cookie 到缓存"""
+    def save(
+        self,
+        provider: str,
+        account_name: str,
+        session: str,
+        api_user: str,
+        cookies: dict | None = None,
+    ) -> None:
+        """保存 Cookie 到缓存（支持保存完整 cookie bundle）"""
         path = self._get_cache_path(provider, account_name)
+        cookie_bundle: dict[str, str] = {}
+        if isinstance(cookies, dict):
+            cookie_bundle = {
+                str(k): str(v)
+                for k, v in cookies.items()
+                if k and v is not None and str(v).strip()
+            }
+        if "session" not in cookie_bundle and session:
+            cookie_bundle["session"] = session
+
         data = {
             "session": session,
             "api_user": api_user,
             "provider": provider,
             "account_name": account_name,
             "cached_at": time.time(),
+            "cookies": cookie_bundle,
         }
         try:
             path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -101,3 +130,57 @@ class CookieCache:
         if path.exists():
             path.unlink(missing_ok=True)
             logger.info(f"[CookieCache] 已清除缓存: {provider}/{account_name}")
+
+    def list_valid(self) -> list[dict]:
+        """列出全部有效缓存记录"""
+        records: list[dict] = []
+        now = time.time()
+
+        for path in sorted(self.cache_dir.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                cached_at = float(data.get("cached_at", 0))
+                age_days = (now - cached_at) / 86400
+
+                if age_days > self.expiry_days:
+                    logger.debug(
+                        f"[CookieCache] 缓存已过期({age_days:.1f}天 > {self.expiry_days}天)，清理: {path.name}"
+                    )
+                    path.unlink(missing_ok=True)
+                    continue
+
+                session = str(data.get("session") or "").strip()
+                api_user = str(data.get("api_user") or "").strip()
+                provider = str(data.get("provider") or "").strip()
+                account_name = str(data.get("account_name") or "").strip()
+
+                if not session or not api_user or not provider:
+                    logger.debug(f"[CookieCache] 缓存数据不完整，已清理: {path.name}")
+                    path.unlink(missing_ok=True)
+                    continue
+
+                cookies = data.get("cookies")
+                if isinstance(cookies, dict):
+                    cookie_bundle = {
+                        str(k): str(v)
+                        for k, v in cookies.items()
+                        if k and v is not None and str(v).strip()
+                    }
+                else:
+                    cookie_bundle = {}
+                if "session" not in cookie_bundle and session:
+                    cookie_bundle["session"] = session
+
+                records.append({
+                    "provider": provider,
+                    "account_name": account_name,
+                    "session": session,
+                    "api_user": api_user,
+                    "cached_at": cached_at,
+                    "cookies": cookie_bundle,
+                })
+            except Exception as e:
+                logger.debug(f"[CookieCache] 读取缓存失败，已清理 {path.name}: {e}")
+                path.unlink(missing_ok=True)
+
+        return records

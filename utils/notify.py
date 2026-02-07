@@ -18,6 +18,7 @@ import re
 import smtplib
 from datetime import datetime, timedelta, timezone
 from email.header import Header
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
@@ -170,7 +171,8 @@ class NotificationManager:
         self,
         title: str,
         content: str,
-        msg_type: Literal["text", "html"] = "text"
+        msg_type: Literal["text", "html"] = "text",
+        attachments: list[str] | None = None,
     ):
         """发送邮件通知
         
@@ -190,17 +192,41 @@ class NotificationManager:
         # 发件人显示名称
         sender_name = self.email_sender if self.email_sender else "Github自动签到"
 
-        # 创建邮件 - 使用 MIMEMultipart 确保兼容性
-        msg = MIMEMultipart("alternative")
+        # 有附件时使用 mixed，正文放在 alternative 子块里
+        has_attachments = bool(attachments)
+        if has_attachments:
+            msg = MIMEMultipart("mixed")
+            body = MIMEMultipart("alternative")
+        else:
+            msg = MIMEMultipart("alternative")
+            body = msg
 
         # 添加纯文本备用内容（用于不支持HTML的客户端）
         if msg_type == "html":
-            # 简单的纯文本版本
             plain_text = "请使用支持HTML的邮件客户端查看此邮件。"
-            msg.attach(MIMEText(plain_text, "plain", "utf-8"))
-            msg.attach(MIMEText(content, "html", "utf-8"))
+            body.attach(MIMEText(plain_text, "plain", "utf-8"))
+            body.attach(MIMEText(content, "html", "utf-8"))
         else:
-            msg.attach(MIMEText(content, "plain", "utf-8"))
+            body.attach(MIMEText(content, "plain", "utf-8"))
+
+        if has_attachments:
+            msg.attach(body)
+            for file_path in attachments or []:
+                if not file_path or not os.path.isfile(file_path):
+                    logger.warning(f"[Email] 附件不存在，已跳过: {file_path}")
+                    continue
+                try:
+                    with open(file_path, "rb") as f:
+                        part = MIMEApplication(f.read(), Name=os.path.basename(file_path))
+                    filename = os.path.basename(file_path)
+                    part.add_header(
+                        "Content-Disposition",
+                        "attachment",
+                        filename=("utf-8", "", filename),
+                    )
+                    msg.attach(part)
+                except Exception as e:
+                    logger.warning(f"[Email] 添加附件失败，已跳过 {file_path}: {e}")
 
         # 使用 formataddr + Header 正确编码中文发件人名称 (RFC5322 兼容)
         msg["From"] = formataddr((Header(sender_name, "utf-8").encode(), self.email_user))
@@ -217,6 +243,25 @@ class NotificationManager:
         with smtplib.SMTP_SSL(smtp_server, 465) as server:
             server.login(self.email_user, self.email_pass)
             server.sendmail(self.email_user, [email_to], msg.as_string())
+
+    def send_email_with_attachments(
+        self,
+        title: str,
+        content: str,
+        attachments: list[str],
+        msg_type: Literal["text", "html"] = "text",
+    ) -> bool:
+        """仅发送邮件（可带附件），便于在主通知外发送补充文件。"""
+        try:
+            self._send_email(title, content, msg_type=msg_type, attachments=attachments)
+            logger.success("[Email] 附件邮件发送成功")
+            return True
+        except ValueError as e:
+            logger.warning(f"[Email] 附件邮件未发送（配置缺失）: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"[Email] 附件邮件发送失败: {e}")
+            return False
 
     def _send_gotify(
         self,

@@ -78,12 +78,19 @@ jobs:
           DEBUG: ${{ github.event.inputs.debug || 'false' }}
           DEBUG_MODE: ${{ github.event.inputs.debug || 'false' }}
 
+          # NEWAPI 导出/邮件（导出文件默认供 artifact 与邮件附件使用）
+          NEWAPI_ACCOUNTS_EXPORT_FILE: 签到账户/NEWAPI_ACCOUNTS.json
+          NEWAPI_EXPORT_EMAIL_ENABLED: "true"
+          NEWAPI_EXPORT_EMAIL_SUBJECT: NewAPI 运行后账号快照（NEWAPI_ACCOUNTS）
+
           # Cloudflare 参数（可通过环境变量在代码中读取）
           # 经验：首轮等待更久，后续短超时+刷新，降低误判和抖动
           NEWAPI_CF_MAX_RETRIES: "5"
           NEWAPI_CF_TIMEOUT_FIRST: "45"
           NEWAPI_CF_TIMEOUT_RETRY: "30"
           NEWAPI_CF_RETRY_DELAYS: "6,18,30,45"
+          OAUTH_SITE_TIMEOUT_SHARED: "180"
+          OAUTH_SITE_TIMEOUT_FALLBACK: "220"
           
           # LinuxDO 账户（必填 - 自动模式只需要这个！）
           # JSON 格式: [{"username": "email", "password": "pass", "name": "显示名"}]
@@ -188,6 +195,15 @@ jobs:
               echo "failed_sites.json not found."
             fi
             echo
+            if [ -f "签到账户/NEWAPI_ACCOUNTS.json" ]; then
+              echo "### NEWAPI Accounts Export"
+              echo "export_file: 签到账户/NEWAPI_ACCOUNTS.json"
+              python -c "import json; from pathlib import Path; p=Path('签到账户/NEWAPI_ACCOUNTS.json'); data=json.loads(p.read_text(encoding='utf-8')); print(f'export_count: {len(data) if isinstance(data, list) else 0}')"
+            else
+              echo "### NEWAPI Accounts Export"
+              echo "NEWAPI_ACCOUNTS export file not found."
+            fi
+            echo
             echo "### Key Log Lines"
             grep -E "LDOH|站点可用性过滤|签到结束|OAuth 网络不可达|WinError 1225" run_newapi.log | tail -n 40 || true
             echo
@@ -195,24 +211,41 @@ jobs:
             grep -E "ERROR|WARNING|Cloudflare|401|403|429|Timeout|超时|OAuth" run_newapi.log | tail -n 120 || true
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Commit failed sites report for extension
+      - name: Commit reports (failed sites / optional NEWAPI export)
         if: always()
+        env:
+          NEWAPI_EXPORT_COMMIT_ENABLED: ${{ vars.NEWAPI_EXPORT_COMMIT_ENABLED || 'false' }}
         run: |
-          if [ ! -f scripts/chrome_extension/failed_sites.json ]; then
-            echo "failed_sites.json not found, skip commit."
-            exit 0
-          fi
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add scripts/chrome_extension/failed_sites.json
-          if git diff --cached --quiet; then
-            echo "No failed-sites changes to commit."
+          CHANGED=0
+          if [ -f scripts/chrome_extension/failed_sites.json ]; then
+            git add scripts/chrome_extension/failed_sites.json
+            CHANGED=1
+          else
+            echo "failed_sites.json not found, skip failed-sites commit."
+          fi
+
+          if [ "${NEWAPI_EXPORT_COMMIT_ENABLED}" = "true" ] && [ -f "签到账户/NEWAPI_ACCOUNTS.json" ]; then
+            # 签到账户目录在 .gitignore 中，需强制 add
+            git add -f "签到账户/NEWAPI_ACCOUNTS.json"
+            CHANGED=1
+          else
+            echo "NEWAPI export commit disabled or file missing (set repo variable NEWAPI_EXPORT_COMMIT_ENABLED=true to enable)."
+          fi
+
+          if [ "$CHANGED" -eq 0 ]; then
+            echo "No report file to commit."
             exit 0
           fi
 
-          git commit -m "chore: sync failed sites for chrome extension [skip ci]"
+          if git diff --cached --quiet; then
+            echo "No report changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: sync newapi reports [skip ci]"
           git pull --rebase origin "${GITHUB_REF_NAME}" || true
           git push origin "HEAD:${GITHUB_REF_NAME}" || true
 
@@ -222,6 +255,15 @@ jobs:
         with:
           name: run-newapi-log
           path: run_newapi.log
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload NEWAPI accounts export
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: newapi-accounts-export
+          path: "签到账户/NEWAPI_ACCOUNTS.json"
           retention-days: 3
           if-no-files-found: ignore
 

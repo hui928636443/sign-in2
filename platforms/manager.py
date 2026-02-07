@@ -55,6 +55,9 @@ class PlatformManager:
         self._newapi_failed_sites_file = os.getenv(
             "NEWAPI_FAILED_SITES_FILE", "scripts/chrome_extension/failed_sites.json"
         )
+        self._newapi_accounts_export_file = os.getenv(
+            "NEWAPI_ACCOUNTS_EXPORT_FILE", os.path.join("签到账户", "NEWAPI_ACCOUNTS.json")
+        )
         self._newapi_original_state: dict[int, dict] = {}
         self._newapi_override_applied_accounts: set[int] = set()
         # 缓存 LinuxDO 账户，用于浏览器回退登录
@@ -190,11 +193,22 @@ class PlatformManager:
         provider_name: str,
         session_cookie: str,
         api_user: str,
+        cookies: dict | None = None,
         source: str = "oauth_refresh",
     ) -> None:
         """将新 cookie 持久化为 NEWAPI 账号覆盖，供下次运行优先使用。"""
         if not session_cookie or not api_user:
             return
+
+        cookie_bundle: dict[str, str] = {}
+        if isinstance(cookies, dict):
+            cookie_bundle = {
+                str(k): str(v)
+                for k, v in cookies.items()
+                if k and v is not None and str(v).strip()
+            }
+        if "session" not in cookie_bundle:
+            cookie_bundle["session"] = session_cookie
 
         payload = self._load_newapi_accounts_override()
         keys = self._build_newapi_override_keys(provider_name, account.name, account.api_user)
@@ -202,7 +216,7 @@ class PlatformManager:
             "provider": provider_name,
             "name": account.name,
             "api_user": api_user,
-            "cookies": {"session": session_cookie},
+            "cookies": cookie_bundle,
             "source": source,
             "updated_at": str(int(time.time())),
         }
@@ -211,7 +225,7 @@ class PlatformManager:
         self._save_newapi_accounts_override(payload)
 
         # 同步更新当前内存对象，确保本次运行后续逻辑直接用新值
-        account.cookies = {"session": session_cookie}
+        account.cookies = cookie_bundle
         account.api_user = api_user
         logger.success(f"[{account_name}] 已覆盖 NEWAPI 账号Cookie，下次运行将优先使用新Cookie")
 
@@ -325,6 +339,28 @@ class PlatformManager:
 
         os.environ["BROWSER_ENGINE"] = "nodriver"
         os.environ["BROWSER_HEADLESS"] = "false"
+
+    @staticmethod
+    def _env_bool(name: str, default: bool = False) -> bool:
+        """读取布尔环境变量（非法值回退默认值）。"""
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        value = str(raw).strip().lower()
+        if value in {"1", "true", "yes", "y", "on"}:
+            return True
+        if value in {"0", "false", "no", "n", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _is_debug_mode() -> bool:
+        """检查调试模式（命令行 --debug 或环境变量）。"""
+        return (
+            str(os.getenv("DEBUG", "")).strip().lower() in {"1", "true", "yes", "on"}
+            or str(os.getenv("DEBUG_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+            or str(os.getenv("NEWAPI_DEBUG", "")).strip().lower() in {"1", "true", "yes", "on"}
+        )
 
     @staticmethod
     def _env_int(name: str, default: int, min_value: int = 0) -> int:
@@ -993,6 +1029,177 @@ class PlatformManager:
         logger.info(f"已导出失败站点清单到: {target_path} (count={len(failed_sites)})")
         return target_path
 
+    @staticmethod
+    def _merge_newapi_export_entry(
+        records: dict[tuple[str, str], dict],
+        *,
+        provider: str,
+        name: str,
+        session: str,
+        api_user: str,
+        updated_at: float,
+        source: str,
+        source_priority: int,
+    ) -> None:
+        """合并 NEWAPI 导出记录，优先保留更新且更可靠的数据源。"""
+        provider_norm = (provider or "").strip().lower()
+        name_norm = (name or "").strip()
+        session_norm = (session or "").strip()
+        api_user_norm = (api_user or "").strip()
+        if not provider_norm or not session_norm or not api_user_norm:
+            return
+        if not name_norm:
+            name_norm = provider_norm
+
+        key = (provider_norm, name_norm)
+        current = records.get(key)
+        candidate = {
+            "name": name_norm,
+            "provider": provider_norm,
+            "cookies": {"session": session_norm},
+            "api_user": api_user_norm,
+            "_updated_at": float(updated_at or 0),
+            "_source": source,
+            "_source_priority": source_priority,
+        }
+        if not current:
+            records[key] = candidate
+            return
+
+        current_ts = float(current.get("_updated_at", 0))
+        current_pri = int(current.get("_source_priority", 0))
+        cand_ts = float(candidate.get("_updated_at", 0))
+        cand_pri = int(candidate.get("_source_priority", 0))
+
+        if cand_ts > current_ts or (cand_ts == current_ts and cand_pri >= current_pri):
+            records[key] = candidate
+
+    def export_newapi_accounts_for_sync(self, output_path: str | None = None) -> str:
+        """导出最新 NEWAPI_ACCOUNTS 快照（可直接用于 Secret 回填）。"""
+        target_path = output_path or self._newapi_accounts_export_file
+        records: dict[tuple[str, str], dict] = {}
+        from_config = 0
+        from_override = 0
+        from_cache = 0
+
+        # 1) 当前内存配置（包含启动时应用的 override）
+        for idx, account in enumerate(self.config.anyrouter_accounts):
+            provider = str(account.provider or "").strip().lower()
+            name = account.get_display_name(idx)
+            session = self._extract_session_cookie(account.cookies)
+            api_user = str(account.api_user or "").strip()
+            if provider and session and api_user:
+                self._merge_newapi_export_entry(
+                    records,
+                    provider=provider,
+                    name=name,
+                    session=session,
+                    api_user=api_user,
+                    updated_at=0.0,
+                    source="config",
+                    source_priority=10,
+                )
+                from_config += 1
+
+        # 2) 覆盖文件（通常来自 OAuth 刷新）
+        override_payload = self._load_newapi_accounts_override()
+        for value in override_payload.values():
+            if not isinstance(value, dict):
+                continue
+            provider = str(value.get("provider") or "").strip().lower()
+            name = str(value.get("name") or "").strip() or provider
+            session = self._extract_session_cookie(value.get("cookies"))
+            api_user = str(value.get("api_user") or "").strip()
+            updated_at_raw = value.get("updated_at")
+            try:
+                updated_at = float(updated_at_raw or 0)
+            except Exception:
+                updated_at = 0.0
+            if provider and session and api_user:
+                self._merge_newapi_export_entry(
+                    records,
+                    provider=provider,
+                    name=name,
+                    session=session,
+                    api_user=api_user,
+                    updated_at=updated_at,
+                    source=str(value.get("source") or "override"),
+                    source_priority=20,
+                )
+                from_override += 1
+
+        # 3) Cookie 缓存（本轮/历史成功签到后最可靠）
+        for cached in self._cookie_cache.list_valid():
+            provider = str(cached.get("provider") or "").strip().lower()
+            name = str(cached.get("account_name") or "").strip() or provider
+            session = str(cached.get("session") or "").strip()
+            api_user = str(cached.get("api_user") or "").strip()
+            updated_at = float(cached.get("cached_at") or 0)
+            if provider and session and api_user:
+                self._merge_newapi_export_entry(
+                    records,
+                    provider=provider,
+                    name=name,
+                    session=session,
+                    api_user=api_user,
+                    updated_at=updated_at,
+                    source="cookie_cache",
+                    source_priority=30,
+                )
+                from_cache += 1
+
+        export_data = []
+        for _, item in sorted(records.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+            export_data.append(
+                {
+                    "name": item["name"],
+                    "provider": item["provider"],
+                    "cookies": item["cookies"],
+                    "api_user": item["api_user"],
+                }
+            )
+
+        target_dir = os.path.dirname(target_path) or "."
+        os.makedirs(target_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, dir=target_dir, encoding="utf-8") as tmp:
+            json.dump(export_data, tmp, ensure_ascii=False, indent=2)
+            tmp_path = tmp.name
+        os.replace(tmp_path, target_path)
+        logger.info(
+            f"已导出 NEWAPI_ACCOUNTS 到: {target_path} "
+            f"(records={len(export_data)}, from_config={from_config}, "
+            f"from_override={from_override}, from_cache={from_cache})"
+        )
+        return target_path
+
+    def send_newapi_accounts_export_email(self, export_path: str | None) -> None:
+        """可选：发送 NEWAPI 导出文件附件邮件。"""
+        if not export_path:
+            return
+        if not self._env_bool("NEWAPI_EXPORT_EMAIL_ENABLED", False):
+            logger.info("NEWAPI 导出附件邮件未启用（NEWAPI_EXPORT_EMAIL_ENABLED=false）")
+            return
+        if not os.path.exists(export_path):
+            logger.warning(f"NEWAPI 导出附件不存在，跳过邮件发送: {export_path}")
+            return
+
+        title = os.getenv(
+            "NEWAPI_EXPORT_EMAIL_SUBJECT",
+            f"NEWAPI_ACCOUNTS 导出 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        )
+        content = (
+            "本次 NewAPI 运行已生成最新账号快照，请下载附件中的 NEWAPI_ACCOUNTS.json "
+            "并按需更新到仓库 Secret。"
+        )
+
+        with self.notify:
+            self.notify.send_email_with_attachments(
+                title=title,
+                content=content,
+                attachments=[export_path],
+                msg_type="text",
+            )
+
     async def run_all(self) -> list[CheckinResult]:
         """运行所有平台签到"""
         self.results = []
@@ -1132,7 +1339,6 @@ class PlatformManager:
 
         # 本地兜底站点（LDOH 同步失败时使用）
         providers_to_test = self._get_local_auto_providers()
-        local_fallback_providers = dict(providers_to_test)
         if not providers_to_test:
             logger.warning("未找到可用的本地站点配置，自动模式终止")
             self._log_auto_oauth_summary(stats, results)
@@ -1183,7 +1389,14 @@ class PlatformManager:
                     providers_to_test = synced_providers
                     # 业务要求：无论 LDOH 动态结果如何，始终保留 anyrouter 参与后续流程
                     if "anyrouter" not in providers_to_test:
-                        anyrouter_provider = local_fallback_providers.get("anyrouter")
+                        anyrouter_provider = self.config.providers.get("anyrouter")
+                        if not anyrouter_provider and "anyrouter" in DEFAULT_PROVIDERS:
+                            try:
+                                anyrouter_provider = ProviderConfig.from_dict(
+                                    "anyrouter", DEFAULT_PROVIDERS["anyrouter"]
+                                )
+                            except Exception:
+                                anyrouter_provider = None
                         if anyrouter_provider:
                             providers_to_test["anyrouter"] = anyrouter_provider
                             self._register_runtime_provider("anyrouter", anyrouter_provider)
@@ -1237,8 +1450,17 @@ class PlatformManager:
                         # seed 成功后同步写入持久化缓存
                         seed_session = self._extract_session_cookie(seed_account.cookies)
                         if seed_session and seed_account.api_user:
+                            seed_cookies = (
+                                seed_account.cookies
+                                if isinstance(seed_account.cookies, dict)
+                                else {"session": seed_session}
+                            )
                             self._cookie_cache.save(
-                                provider_name, account_name, seed_session, str(seed_account.api_user)
+                                provider_name,
+                                account_name,
+                                seed_session,
+                                str(seed_account.api_user),
+                                cookies=seed_cookies,
                             )
                         logger.success(f"[{account_name}] NEWAPI_ACCOUNTS seed 签到成功")
                         continue
@@ -1260,7 +1482,11 @@ class PlatformManager:
                 logger.info(f"[{account_name}] 发现缓存Cookie，尝试Cookie+API签到...")
                 try:
                     cached_account = AnyRouterAccount(
-                        cookies={"session": cached["session"]},
+                        cookies=(
+                            cached.get("cookies")
+                            if isinstance(cached.get("cookies"), dict)
+                            else {"session": cached["session"]}
+                        ),
                         api_user=cached["api_user"],
                         provider=provider_name,
                         name=account_name,
@@ -1311,7 +1537,12 @@ class PlatformManager:
             return results
 
         # 3. 优先共享会话 OAuth；失败再回退逐站独立浏览器
-        site_timeout = 120  # 单站点超时：2 分钟
+        debug_mode = self._is_debug_mode()
+        site_timeout = self._env_int(
+            "OAUTH_SITE_TIMEOUT_SHARED",
+            self._env_int("OAUTH_SITE_TIMEOUT", 180 if debug_mode else 150, min_value=60),
+            min_value=60,
+        )
         if browser_mgr and linuxdo_logged_in and tab:
             logger.info(f"需要浏览器OAuth登录: {len(need_oauth)} 个站点（共享会话，每站限时 {site_timeout}s）")
 
@@ -1337,9 +1568,18 @@ class PlatformManager:
                         if result.details:
                             cached_session = result.details.pop("_cached_session", None)
                             cached_api_user = result.details.pop("_cached_api_user", None)
+                            cached_cookies = result.details.pop("_cached_cookies", None)
                             if cached_session and cached_api_user:
                                 self._cookie_cache.save(
-                                    provider_name, account_name, cached_session, cached_api_user
+                                    provider_name,
+                                    account_name,
+                                    cached_session,
+                                    cached_api_user,
+                                    cookies=(
+                                        cached_cookies
+                                        if isinstance(cached_cookies, dict)
+                                        else {"session": cached_session}
+                                    ),
                                 )
                                 logger.success(f"[{account_name}] 新Cookie已缓存")
                     else:
@@ -1420,11 +1660,17 @@ class PlatformManager:
 
                 # 用获取到的 session 签到
                 logger.info(f"[{account_name}] 使用新 session 签到...")
-                success, message, details = await checker._checkin_with_cookies(session_cookie, api_user)
+                runtime_cookies = checker.get_runtime_cookies()
+                success, message, details = await checker._checkin_with_cookies(
+                    session_cookie,
+                    api_user,
+                    extra_cookies=runtime_cookies,
+                )
 
                 details["login_method"] = "shared_oauth"
                 details["_cached_session"] = session_cookie
                 details["_cached_api_user"] = api_user
+                details["_cached_cookies"] = runtime_cookies or {"session": session_cookie}
 
                 return CheckinResult(
                     platform=f"NewAPI ({provider_name})",
@@ -1470,7 +1716,12 @@ class PlatformManager:
         """回退模式：共享会话失败时，逐站独立启动浏览器"""
         from platforms.newapi_browser import browser_checkin_newapi
 
-        site_timeout = 180
+        debug_mode = self._is_debug_mode()
+        site_timeout = self._env_int(
+            "OAUTH_SITE_TIMEOUT_FALLBACK",
+            self._env_int("OAUTH_SITE_TIMEOUT", 220 if debug_mode else 180, min_value=60),
+            min_value=60,
+        )
         retry_count = self._env_int("OAUTH_NETWORK_RETRY_COUNT", 2, min_value=0)
         backoff_base = self._env_float("OAUTH_NETWORK_RETRY_BACKOFF", 2.0, min_value=0.5)
         attempt_total = retry_count + 1
@@ -1512,8 +1763,19 @@ class PlatformManager:
                     if result.status == CheckinStatus.SUCCESS and result.details:
                         cached_session = result.details.pop("_cached_session", None)
                         cached_api_user = result.details.pop("_cached_api_user", None)
+                        cached_cookies = result.details.pop("_cached_cookies", None)
                         if cached_session and cached_api_user:
-                            self._cookie_cache.save(provider_name, account_name, cached_session, cached_api_user)
+                            self._cookie_cache.save(
+                                provider_name,
+                                account_name,
+                                cached_session,
+                                cached_api_user,
+                                cookies=(
+                                    cached_cookies
+                                    if isinstance(cached_cookies, dict)
+                                    else {"session": cached_session}
+                                ),
+                            )
 
                     final_result = result
                     break
@@ -1619,7 +1881,11 @@ class PlatformManager:
                 logger.info(f"[{account_name}] 检测到持久化Cookie，优先尝试")
                 try:
                     cached_account = AnyRouterAccount(
-                        cookies={"session": cached["session"]},
+                        cookies=(
+                            cached.get("cookies")
+                            if isinstance(cached.get("cookies"), dict)
+                            else {"session": cached["session"]}
+                        ),
                         api_user=cached["api_user"],
                         provider=account.provider,
                         name=account.name,
@@ -1684,7 +1950,11 @@ class PlatformManager:
                             logger.info(f"[{account_name}] 检测到缓存Cookie，作为最终兜底再尝试一次")
                             try:
                                 cached_account = AnyRouterAccount(
-                                    cookies={"session": cached["session"]},
+                                    cookies=(
+                                        cached.get("cookies")
+                                        if isinstance(cached.get("cookies"), dict)
+                                        else {"session": cached["session"]}
+                                    ),
                                     api_user=cached["api_user"],
                                     provider=account.provider,
                                     name=account.name,
@@ -1782,9 +2052,18 @@ class PlatformManager:
                     if result.details:
                         cached_session = result.details.pop("_cached_session", None)
                         cached_api_user = result.details.pop("_cached_api_user", None)
+                        cached_cookies = result.details.pop("_cached_cookies", None)
                         if cached_session and cached_api_user:
                             self._cookie_cache.save(
-                                provider.name, account_name, cached_session, cached_api_user
+                                provider.name,
+                                account_name,
+                                cached_session,
+                                cached_api_user,
+                                cookies=(
+                                    cached_cookies
+                                    if isinstance(cached_cookies, dict)
+                                    else {"session": cached_session}
+                                ),
                             )
                             logger.success(
                                 f"[{account_name}] 新Cookie已缓存，下次将优先使用Cookie+API方式"
@@ -1796,6 +2075,11 @@ class PlatformManager:
                                 provider_name=provider.name,
                                 session_cookie=cached_session,
                                 api_user=cached_api_user,
+                                cookies=(
+                                    cached_cookies
+                                    if isinstance(cached_cookies, dict)
+                                    else {"session": cached_session}
+                                ),
                                 source="oauth_refresh",
                             )
                 else:
@@ -1822,8 +2106,16 @@ class PlatformManager:
 
     async def _checkin_newapi(self, account, provider, account_name: str) -> CheckinResult:
         """执行单个 NewAPI 站点签到"""
-        # 提取 session cookie
-        session_cookie = self._extract_session_cookie(account.cookies)
+        # 提取 cookie（优先使用完整 cookie bundle，至少包含 session）
+        cookies: dict[str, str] = {}
+        if isinstance(account.cookies, dict):
+            cookies = {
+                str(k): str(v)
+                for k, v in account.cookies.items()
+                if k and v is not None and str(v).strip()
+            }
+
+        session_cookie = cookies.get("session") or self._extract_session_cookie(account.cookies)
         if not session_cookie:
             return CheckinResult(
                 platform=f"NewAPI ({provider.name})",
@@ -1831,6 +2123,8 @@ class PlatformManager:
                 status=CheckinStatus.FAILED,
                 message="无效的 session cookie",
             )
+        if "session" not in cookies:
+            cookies["session"] = session_cookie
 
         # 构建请求
         headers = {
@@ -1839,10 +2133,9 @@ class PlatformManager:
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": provider.domain,
             "Origin": provider.domain,
-            provider.api_user_key: account.api_user,
+            provider.api_user_key: str(account.api_user),
         }
 
-        cookies = {"session": session_cookie}
         details = {}
 
         # 如果需要 WAF bypass，先获取 WAF cookies
