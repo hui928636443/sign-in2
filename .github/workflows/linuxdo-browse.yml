@@ -34,7 +34,7 @@ jobs:
 
       # 设置 Python
       - name: Set up Python
-        run: uv python install 3.12.12
+        run: uv python install 3.12
 
       # 安装依赖
       - name: Install dependencies
