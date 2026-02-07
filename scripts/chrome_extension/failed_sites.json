@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-02-07T09:43:16.902673+00:00",
+  "generated_at": "2026-02-07T11:30:59.200005+00:00",
   "source": "github_actions",
   "failed_count": 13,
   "failed_sites": [
@@ -11,19 +11,10 @@
       "site_url": "https://api.daiju.live",
       "login_url": "https://api.daiju.live/login",
       "oauth_login_url": "https://api.daiju.live/auth/login?returnTo=%2F",
-      "reason": "OAuth 登录失败，无法获取 session",
-      "needs_manual_auth": true,
-      "oauth_cookie_blocked": true
-    },
-    {
-      "provider": "ldoh_router_tumuer_me",
-      "account_name": "主账号_ldoh_router_tumuer_me",
-      "api_user": "",
-      "platform": "NewAPI (ldoh_router_tumuer_me)",
-      "site_url": "https://router.tumuer.me",
-      "login_url": "https://router.tumuer.me/login",
-      "oauth_login_url": "https://router.tumuer.me/auth/login?returnTo=%2F",
-      "reason": "OAuth 登录失败，无法获取 session",
+      "reason": "HTTP 403 被拦截(Cookie过期或Cloudflare)",
+      "failure_kind": "cookie_blocked",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
       "oauth_cookie_blocked": true
     },
@@ -35,9 +26,12 @@
       "site_url": "https://kfc-api.sxxe.net",
       "login_url": "https://kfc-api.sxxe.net/login",
       "oauth_login_url": "https://kfc-api.sxxe.net/auth/login?returnTo=%2F",
-      "reason": "OAuth 登录失败，无法获取 session",
+      "reason": "OAuth 超时（>180s）",
+      "failure_kind": "",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
-      "oauth_cookie_blocked": true
+      "oauth_cookie_blocked": false
     },
     {
       "provider": "hotaru",
@@ -48,6 +42,9 @@
       "login_url": "https://api.hotaruapi.top/login",
       "oauth_login_url": "https://api.hotaruapi.top/auth/login?returnTo=%2F",
       "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
       "oauth_cookie_blocked": true
     },
@@ -60,6 +57,9 @@
       "login_url": "https://lightllm.online/login",
       "oauth_login_url": "https://lightllm.online/auth/login?returnTo=%2F",
       "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
       "oauth_cookie_blocked": true
     },
@@ -71,9 +71,12 @@
       "site_url": "https://elysiver.h-e.top",
       "login_url": "https://elysiver.h-e.top/login",
       "oauth_login_url": "https://elysiver.h-e.top/auth/login?returnTo=%2F",
-      "reason": "OAuth 超时（>180s）",
+      "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
-      "oauth_cookie_blocked": false
+      "oauth_cookie_blocked": true
     },
     {
       "provider": "ldoh_linuxdoapi_223384_xyz",
@@ -84,18 +87,9 @@
       "login_url": "https://linuxdoapi.223384.xyz/login",
       "oauth_login_url": "https://linuxdoapi.223384.xyz/auth/login?returnTo=%2F",
       "reason": "OAuth 登录失败，无法获取 session",
-      "needs_manual_auth": true,
-      "oauth_cookie_blocked": true
-    },
-    {
-      "provider": "ldoh_api_usegemini_xyz",
-      "account_name": "主账号_ldoh_api_usegemini_xyz",
-      "api_user": "",
-      "platform": "NewAPI (ldoh_api_usegemini_xyz)",
-      "site_url": "https://api.usegemini.xyz",
-      "login_url": "https://api.usegemini.xyz/login",
-      "oauth_login_url": "https://api.usegemini.xyz/auth/login?returnTo=%2F",
-      "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
       "oauth_cookie_blocked": true
     },
@@ -108,6 +102,24 @@
       "login_url": "https://newapi.linuxdo.edu.rs/login",
       "oauth_login_url": "https://newapi.linuxdo.edu.rs/auth/login?returnTo=%2F",
       "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
+      "needs_manual_auth": true,
+      "oauth_cookie_blocked": true
+    },
+    {
+      "provider": "ldoh_api_usegemini_xyz",
+      "account_name": "主账号_ldoh_api_usegemini_xyz",
+      "api_user": "",
+      "platform": "NewAPI (ldoh_api_usegemini_xyz)",
+      "site_url": "https://api.usegemini.xyz",
+      "login_url": "https://api.usegemini.xyz/login",
+      "oauth_login_url": "https://api.usegemini.xyz/auth/login?returnTo=%2F",
+      "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
       "oauth_cookie_blocked": true
     },
@@ -120,18 +132,9 @@
       "login_url": "https://clove.cc.cd/login",
       "oauth_login_url": "https://clove.cc.cd/auth/login?returnTo=%2F",
       "reason": "OAuth 登录失败，无法获取 session",
-      "needs_manual_auth": true,
-      "oauth_cookie_blocked": true
-    },
-    {
-      "provider": "ldoh_ai_qaq_al",
-      "account_name": "主账号_ldoh_ai_qaq_al",
-      "api_user": "",
-      "platform": "NewAPI (ldoh_ai_qaq_al)",
-      "site_url": "https://ai.qaq.al",
-      "login_url": "https://ai.qaq.al/login",
-      "oauth_login_url": "https://ai.qaq.al/auth/login?returnTo=%2F",
-      "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
       "oauth_cookie_blocked": true
     },
@@ -144,6 +147,39 @@
       "login_url": "https://wzw.pp.ua/login",
       "oauth_login_url": "https://wzw.pp.ua/auth/login?returnTo=%2F",
       "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
+      "needs_manual_auth": true,
+      "oauth_cookie_blocked": true
+    },
+    {
+      "provider": "ldoh_mb666_zeabur_app",
+      "account_name": "主账号_ldoh_mb666_zeabur_app",
+      "api_user": "",
+      "platform": "NewAPI (ldoh_mb666_zeabur_app)",
+      "site_url": "https://mb666.zeabur.app",
+      "login_url": "https://mb666.zeabur.app/login",
+      "oauth_login_url": "https://mb666.zeabur.app/auth/login?returnTo=%2F",
+      "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
+      "needs_manual_auth": true,
+      "oauth_cookie_blocked": true
+    },
+    {
+      "provider": "ldoh_ai_qaq_al",
+      "account_name": "主账号_ldoh_ai_qaq_al",
+      "api_user": "",
+      "platform": "NewAPI (ldoh_ai_qaq_al)",
+      "site_url": "https://ai.qaq.al",
+      "login_url": "https://ai.qaq.al/login",
+      "oauth_login_url": "https://ai.qaq.al/auth/login?returnTo=%2F",
+      "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
       "oauth_cookie_blocked": true
     },
@@ -156,6 +192,9 @@
       "login_url": "https://ai.121628.xyz/login",
       "oauth_login_url": "https://ai.121628.xyz/auth/login?returnTo=%2F",
       "reason": "OAuth 登录失败，无法获取 session",
+      "failure_kind": "session_missing",
+      "runtime_cookie_keys": [],
+      "last_url": "",
       "needs_manual_auth": true,
       "oauth_cookie_blocked": true
     }
