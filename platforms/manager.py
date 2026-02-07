@@ -1132,6 +1132,7 @@ class PlatformManager:
 
         # 本地兜底站点（LDOH 同步失败时使用）
         providers_to_test = self._get_local_auto_providers()
+        local_fallback_providers = dict(providers_to_test)
         if not providers_to_test:
             logger.warning("未找到可用的本地站点配置，自动模式终止")
             self._log_auto_oauth_summary(stats, results)
@@ -1180,6 +1181,15 @@ class PlatformManager:
                 synced_providers = await self._try_sync_ldoh_providers(tab, providers_to_test)
                 if synced_providers:
                     providers_to_test = synced_providers
+                    # 业务要求：无论 LDOH 动态结果如何，始终保留 anyrouter 参与后续流程
+                    if "anyrouter" not in providers_to_test:
+                        anyrouter_provider = local_fallback_providers.get("anyrouter")
+                        if anyrouter_provider:
+                            providers_to_test["anyrouter"] = anyrouter_provider
+                            self._register_runtime_provider("anyrouter", anyrouter_provider)
+                            logger.info("LDOH 同步后强制并入 anyrouter")
+                        else:
+                            logger.warning("LDOH 同步后尝试并入 anyrouter 失败：本地未找到 anyrouter 配置")
                     stats["ldoh_sync_status"] = "success"
                 else:
                     logger.warning("LDOH 同步失败，使用本地兜底站点继续")
