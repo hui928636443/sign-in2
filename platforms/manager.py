@@ -1452,6 +1452,12 @@ class PlatformManager:
         linuxdo_name = linuxdo_account.get("name", linuxdo_username)
         checkin_sites: list[str] = linuxdo_account.get("checkin_sites") or []
         exclude_sites: list[str] = linuxdo_account.get("exclude_sites") or []
+
+        # 环境变量覆盖 checkin_sites（用于快速调试单个站点，如 CHECKIN_SITES_OVERRIDE=anyrouter）
+        env_checkin_override = os.environ.get("CHECKIN_SITES_OVERRIDE", "").strip()
+        if env_checkin_override:
+            checkin_sites = [s.strip() for s in env_checkin_override.split(",") if s.strip()]
+            logger.info(f"[{linuxdo_name}] CHECKIN_SITES_OVERRIDE 覆盖: {checkin_sites}")
         account_progress = (
             f"{account_index + 1}/{account_total}"
             if account_total > 0

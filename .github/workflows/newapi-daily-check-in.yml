@@ -9,6 +9,9 @@ on:
       platform:
         description: '指定平台（留空运行全部）'
         required: false
+      checkin_sites:
+        description: '仅签到指定站点（逗号分隔，如 anyrouter,kfcapi，留空=按配置）'
+        required: false
       debug:
         description: '开启 Debug 模式（截图+详细日志）'
         required: false
@@ -72,6 +75,9 @@ jobs:
           BROWSER_HEADLESS: "false"
           DISPLAY: ":99"
           
+          # 站点过滤（手动触发时可指定仅签到某些站点，加速调试）
+          CHECKIN_SITES_OVERRIDE: ${{ github.event.inputs.checkin_sites || '' }}
+
           # Debug 模式（设置为 true 开启截图和详细日志）
           # DEBUG: "true"
           NEWAPI_DEBUG: ${{ github.event.inputs.debug || 'false' }}
