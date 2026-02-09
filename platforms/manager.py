@@ -238,7 +238,8 @@ class PlatformManager:
                     "username": acc.username,
                     "password": acc.password,
                     "name": acc.name,
-                    "checkin_sites": acc.checkin_sites,  # 空=全部站点，非空=仅指定站点
+                    "checkin_sites": acc.checkin_sites,  # 空=全部站点，非空=仅指定站点（白名单）
+                    "exclude_sites": acc.exclude_sites,  # 空=不排除，非空=跳过指定站点（黑名单）
                 })
         if self._linuxdo_accounts:
             logger.info(f"已加载 {len(self._linuxdo_accounts)} 个 LinuxDO 账户用于浏览器回退登录")
@@ -333,7 +334,7 @@ class PlatformManager:
         """导出可用站点列表到 000/可用站点列表.md（自动更新部分）。
 
         在每次签到运行后自动更新，方便用户查看当前可用的站点 ID 和 URL，
-        用于配置 checkin_sites 字段。
+        用于配置 checkin_sites（白名单）和 exclude_sites（黑名单）字段。
         """
         sites_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "000", "可用站点列表.md")
         if not os.path.exists(sites_file):
@@ -1450,6 +1451,7 @@ class PlatformManager:
         linuxdo_password = linuxdo_account["password"]
         linuxdo_name = linuxdo_account.get("name", linuxdo_username)
         checkin_sites: list[str] = linuxdo_account.get("checkin_sites") or []
+        exclude_sites: list[str] = linuxdo_account.get("exclude_sites") or []
         account_progress = (
             f"{account_index + 1}/{account_total}"
             if account_total > 0
@@ -1559,22 +1561,41 @@ class PlatformManager:
             self._log_auto_oauth_summary(stats, results)
             return results
 
-        # 按 checkin_sites 过滤：非空时仅保留指定站点，空则保留全部（默认行为）
+        # 按 checkin_sites 过滤（白名单）：非空时仅保留指定站点，空则保留全部（默认行为）
+        # 支持精确匹配 + 模糊匹配（LDOH 同步后站点名称可能变化，如 hotaru → ldoh_hotaruapi_com）
         if checkin_sites:
             checkin_set = {s.strip().lower() for s in checkin_sites if s.strip()}
             before_count = len(providers_to_test)
-            providers_to_test = {
-                name: prov for name, prov in providers_to_test.items()
-                if name.lower() in checkin_set
-            }
-            skipped_names = checkin_set - {n.lower() for n in providers_to_test}
-            if skipped_names:
+            filtered: dict[str, ProviderConfig] = {}
+            matched_specs: set[str] = set()
+
+            for prov_name, prov in providers_to_test.items():
+                prov_lower = prov_name.lower()
+                # 精确匹配
+                if prov_lower in checkin_set:
+                    filtered[prov_name] = prov
+                    matched_specs.add(prov_lower)
+                    continue
+                # 模糊匹配：用户指定的名称是 provider 名称或显示名的子串
+                # 例如 "hotaru" 匹配 "ldoh_hotaruapi_com"，"duckcoding" 匹配 "ldoh_free_duckcoding_com"
+                for spec in checkin_set:
+                    if spec in prov_lower or spec in (prov.name or "").lower():
+                        filtered[prov_name] = prov
+                        matched_specs.add(spec)
+                        logger.debug(
+                            f"[{linuxdo_name}] checkin_sites 模糊匹配: '{spec}' → '{prov_name}'"
+                        )
+                        break
+
+            providers_to_test = filtered
+            unmatched = checkin_set - matched_specs
+            if unmatched:
                 logger.warning(
-                    f"[{linuxdo_name}] checkin_sites 中以下站点未在可用列表中: {sorted(skipped_names)}"
+                    f"[{linuxdo_name}] checkin_sites 中以下站点未匹配到任何可用站点: {sorted(unmatched)}"
                 )
             logger.info(
-                f"[{linuxdo_name}] checkin_sites 过滤: {before_count} → {len(providers_to_test)} 个站点 "
-                f"(指定: {sorted(checkin_set)})"
+                f"[{linuxdo_name}] checkin_sites 白名单过滤: {before_count} → {len(providers_to_test)} 个站点 "
+                f"(指定: {sorted(checkin_set)}, 匹配: {sorted(matched_specs)})"
             )
             if not providers_to_test:
                 logger.warning(f"[{linuxdo_name}] checkin_sites 过滤后无可用站点，跳过")
@@ -1586,6 +1607,46 @@ class PlatformManager:
                 return results
         else:
             logger.info(f"[{linuxdo_name}] checkin_sites 未设置，签到全部可用站点")
+
+        # 按 exclude_sites 排除（黑名单）：非空时从候选列表中移除指定站点
+        # 同样支持模糊匹配
+        if exclude_sites:
+            exclude_set = {s.strip().lower() for s in exclude_sites if s.strip()}
+            before_count = len(providers_to_test)
+            excluded_names: set[str] = set()
+
+            for prov_name, prov in list(providers_to_test.items()):
+                prov_lower = prov_name.lower()
+                should_exclude = False
+                # 精确匹配
+                if prov_lower in exclude_set:
+                    should_exclude = True
+                else:
+                    # 模糊匹配
+                    for spec in exclude_set:
+                        if spec in prov_lower or spec in (prov.name or "").lower():
+                            should_exclude = True
+                            break
+                if should_exclude:
+                    excluded_names.add(prov_name)
+
+            providers_to_test = {
+                name: prov for name, prov in providers_to_test.items()
+                if name not in excluded_names
+            }
+            if excluded_names:
+                logger.info(
+                    f"[{linuxdo_name}] exclude_sites 黑名单排除: {before_count} → {len(providers_to_test)} 个站点 "
+                    f"(排除: {sorted(n.lower() for n in excluded_names)})"
+                )
+            if not providers_to_test:
+                logger.warning(f"[{linuxdo_name}] exclude_sites 排除后无可用站点，跳过")
+                try:
+                    await browser_mgr.close()
+                except Exception:
+                    pass
+                self._log_auto_oauth_summary(stats, results)
+                return results
 
         # 统计需要浏览器 OAuth 的站点（无缓存或缓存失效）
         need_oauth = []
