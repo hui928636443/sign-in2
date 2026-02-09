@@ -499,7 +499,7 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
     },
     "agentrouter": {
         "domain": "https://agentrouter.org",
-        "sign_in_path": None,  # 同 anyrouter，无签到 API
+        "sign_in_path": None,  # agentrouter 无独立签到 API，通过访问用户信息页自动完成签到
         "bypass_method": "waf_cookies",
         "waf_cookie_names": ["acw_tc"],
     },
