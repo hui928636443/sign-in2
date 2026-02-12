@@ -20,6 +20,7 @@ const extractSummaryEl = document.getElementById("extractSummary");
 const refreshBtn = document.getElementById("refreshBtn");
 const openFailedBtn = document.getElementById("openFailedBtn");
 const extractBtn = document.getElementById("extractBtn");
+const extractCurrentBtn = document.getElementById("extractCurrentBtn");
 const copyBtn = document.getElementById("copyBtn");
 
 let failedSites = [];
@@ -86,6 +87,43 @@ function parseDomainFromUrl(rawUrl) {
   } catch {
     return "";
   }
+}
+
+function normalizeHostname(hostname) {
+  return String(hostname || "").trim().toLowerCase().replace(/^\.+/, "");
+}
+
+function isSameOrParentDomain(hostname, candidateDomain) {
+  const host = normalizeHostname(hostname);
+  const candidate = normalizeHostname(candidateDomain);
+  if (!host || !candidate) return false;
+  return host === candidate || host.endsWith(`.${candidate}`);
+}
+
+function getCookie(details) {
+  return new Promise((resolve, reject) => {
+    chrome.cookies.get(details, (cookie) => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError) {
+        reject(new Error(lastError.message || "读取 cookie 失败"));
+        return;
+      }
+      resolve(cookie || null);
+    });
+  });
+}
+
+function getCookies(details) {
+  return new Promise((resolve, reject) => {
+    chrome.cookies.getAll(details, (cookies) => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError) {
+        reject(new Error(lastError.message || "读取 cookies 失败"));
+        return;
+      }
+      resolve(Array.isArray(cookies) ? cookies : []);
+    });
+  });
 }
 
 function normalizeAccountRecord(input) {
@@ -241,23 +279,38 @@ async function openAllFailedSites() {
 }
 
 async function getSessionByDomain(domain) {
-  return new Promise((resolve) => {
-    chrome.cookies.getAll({ domain }, (cookies) => {
-      const hit = cookies.find((c) => c.name === "session" && c.value);
-      resolve(hit ? hit.value : "");
-    });
-  });
+  const normalizedDomain = normalizeHostname(domain);
+  if (!normalizedDomain) return "";
+  try {
+    const cookies = await getCookies({ domain: normalizedDomain });
+    const hit = cookies.find((c) => c.name === "session" && c.value);
+    return hit ? hit.value : "";
+  } catch {
+    return "";
+  }
 }
 
-async function getApiUserFromOpenTab(domain) {
-  const tabs = await chrome.tabs.query({ url: [`*://${domain}/*`, `*://*.${domain}/*`] });
-  if (!tabs.length) return "";
+async function getSessionByUrl(rawUrl) {
+  const url = String(rawUrl || "").trim();
+  if (!url) return "";
+
+  try {
+    const hit = await getCookie({ url, name: "session" });
+    if (hit?.value) return String(hit.value);
+  } catch {}
+
+  const domain = parseDomainFromUrl(url);
+  return getSessionByDomain(domain);
+}
+
+async function getApiUserFromTabId(tabId) {
+  if (!tabId) return "";
 
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId: tabs[0].id },
+      target: { tabId },
       func: () => {
-        const keys = ["user", "newapi_user", "profile"]; 
+        const keys = ["user", "newapi_user", "profile"];
         for (const k of keys) {
           const v = localStorage.getItem(k);
           if (!v) continue;
@@ -275,6 +328,15 @@ async function getApiUserFromOpenTab(domain) {
   } catch {
     return "";
   }
+}
+
+async function getApiUserFromOpenTab(domain) {
+  const normalizedDomain = normalizeHostname(domain);
+  if (!normalizedDomain) return "";
+
+  const tabs = await chrome.tabs.query({ url: [`*://${normalizedDomain}/*`, `*://*.${normalizedDomain}/*`] });
+  if (!tabs.length) return "";
+  return getApiUserFromTabId(tabs[0].id);
 }
 
 function parseBaseAccounts() {
@@ -315,6 +377,122 @@ function mergeAccounts(baseAccounts, newAccounts) {
     const byProvider = a.provider.localeCompare(b.provider);
     if (byProvider !== 0) return byProvider;
     return String(a.api_user).localeCompare(String(b.api_user));
+  });
+}
+
+async function getCurrentActiveTab() {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tabs[0] || null;
+}
+
+function findFailedSiteByHostname(hostname) {
+  const target = normalizeHostname(hostname);
+  if (!target) return null;
+
+  const exact = failedSites.find((site) => {
+    const domain = parseDomainFromUrl(pickOpenUrl(site) || site.site_url);
+    return normalizeHostname(domain) === target;
+  });
+  if (exact) return exact;
+
+  return (
+    failedSites.find((site) => {
+      const domain = parseDomainFromUrl(pickOpenUrl(site) || site.site_url);
+      return isSameOrParentDomain(target, domain) || isSameOrParentDomain(domain, target);
+    }) || null
+  );
+}
+
+function buildCurrentAccountRecord({ matchedSite, provider, apiUser, session }) {
+  const providerForOutput = provider || "__FILL_PROVIDER__";
+  const apiUserForOutput = apiUser || "__FILL_API_USER__";
+  const fallbackName = `${providerForOutput}_${apiUserForOutput}`;
+  return {
+    name: String(matchedSite?.account_name || fallbackName).trim() || fallbackName,
+    provider: providerForOutput,
+    cookies: { session },
+    api_user: String(apiUserForOutput),
+  };
+}
+
+async function extractCurrentSiteCookieAndBuildSecret() {
+  const tab = await getCurrentActiveTab();
+  const tabUrl = String(tab?.url || "").trim();
+  if (!tabUrl) {
+    setStatus("未找到当前活动标签页，请先打开目标站点。");
+    return;
+  }
+
+  if (!/^https?:\/\//i.test(tabUrl)) {
+    setStatus("当前标签页不是 http/https 页面，无法读取站点 cookie。");
+    return;
+  }
+
+  const hostname = normalizeHostname(parseDomainFromUrl(tabUrl));
+  if (!hostname) {
+    setStatus("无法解析当前站点域名。");
+    return;
+  }
+
+  const session = await getSessionByUrl(tabUrl);
+  if (!session) {
+    setStatus(`当前站点 ${hostname} 未找到 session cookie。请先确认已登录并刷新页面。`);
+    extractSummaryEl.textContent = `当前站点: ${hostname}\n未找到 session cookie。`;
+    return;
+  }
+
+  let baseAccounts = [];
+  try {
+    baseAccounts = parseBaseAccounts();
+  } catch (e) {
+    setStatus(`解析当前 NEWAPI_ACCOUNTS 失败: ${e.message}`);
+    return;
+  }
+
+  const matchedSite = findFailedSiteByHostname(hostname);
+  const provider = normalizeProvider(matchedSite?.provider || "");
+  const apiUserFromPage = await getApiUserFromTabId(tab?.id);
+  const apiUser = String(apiUserFromPage || matchedSite?.api_user || "").trim();
+
+  const currentRecord = buildCurrentAccountRecord({
+    matchedSite,
+    provider,
+    apiUser,
+    session,
+  });
+
+  const missingFields = [];
+  if (!provider) missingFields.push("provider");
+  if (!apiUser) missingFields.push("api_user");
+
+  const merged = missingFields.length
+    ? [currentRecord]
+    : mergeAccounts(baseAccounts, [currentRecord]);
+
+  resultJsonEl.value = JSON.stringify(merged, null, 2);
+
+  const lines = [];
+  lines.push(`当前站点: ${hostname}`);
+  lines.push(`session: 已获取（长度 ${session.length}）`);
+  if (matchedSite) {
+    lines.push(`匹配失败清单: ${matchedSite.provider || "unknown"} / ${matchedSite.account_name || "unknown"}`);
+  }
+  if (missingFields.length) {
+    lines.push(`缺少字段: ${missingFields.join(", ")}（已填占位符）`);
+  } else {
+    lines.push(`已合并结果，共 ${merged.length} 条。`);
+  }
+  extractSummaryEl.textContent = lines.join("\n");
+
+  if (missingFields.length) {
+    setStatus(`已提取当前站点 cookie，但缺少 ${missingFields.join(", ")}，请先改占位符再使用。`);
+  } else {
+    setStatus(`完成：已提取当前站点并生成 NEWAPI_ACCOUNTS（共 ${merged.length} 条）。`);
+  }
+
+  await storageSet({
+    [STORAGE_KEYS.baseAccounts]: baseAccountsEl.value,
+    [STORAGE_KEYS.resultAccounts]: resultJsonEl.value,
   });
 }
 
@@ -452,6 +630,15 @@ extractBtn.addEventListener("click", async () => {
     await extractFailedCookiesAndBuildSecret();
   } finally {
     extractBtn.disabled = false;
+  }
+});
+
+extractCurrentBtn.addEventListener("click", async () => {
+  extractCurrentBtn.disabled = true;
+  try {
+    await extractCurrentSiteCookieAndBuildSecret();
+  } finally {
+    extractCurrentBtn.disabled = false;
   }
 });
 
