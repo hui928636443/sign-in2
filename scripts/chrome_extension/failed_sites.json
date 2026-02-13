@@ -1,6 +1,22 @@
 {
-  "generated_at": "2026-02-13T06:12:29.494816+00:00",
+  "generated_at": "2026-02-13T13:02:36.284024+00:00",
   "source": "github_actions",
-  "failed_count": 0,
-  "failed_sites": []
+  "failed_count": 1,
+  "failed_sites": [
+    {
+      "provider": "runanytime",
+      "account_name": "主账号_runanytime",
+      "api_user": "",
+      "platform": "NewAPI (runanytime)",
+      "site_url": "https://runanytime.hxi.me",
+      "login_url": "https://runanytime.hxi.me/login",
+      "oauth_login_url": "https://runanytime.hxi.me/auth/login?returnTo=%2F",
+      "reason": "Cookie 已过期",
+      "failure_kind": "cookie_expired",
+      "runtime_cookie_keys": [],
+      "last_url": "",
+      "needs_manual_auth": true,
+      "oauth_cookie_blocked": false
+    }
+  ]
 }
